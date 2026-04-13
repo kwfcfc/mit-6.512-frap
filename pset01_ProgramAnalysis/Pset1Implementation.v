@@ -213,6 +213,11 @@ Qed.
     end.
 
 
+  Theorem concatProg_Example :
+     concatProg (AddThen 1 Done) (MulThen 2 Done)
+   = AddThen 1 (MulThen 2 Done).
+  Proof. simpl. reflexivity. Qed.
+
   (* Prove that the number of instructions in the concatenation of
    * two programs is the sum of the number of instructions in each
    * program.
@@ -357,52 +362,51 @@ Qed.
         (validateFunc p true = true -> forall s, s <> 0 -> runPortable p s = (true, run p s)) /\
         (validateFunc p false = true -> forall s, runPortable p s = (true, run p s)).
   Proof.
-    (* two common tactics *)
-    Ltac use_IH0 IH Hp := apply IH; exact Hp.
-    Ltac use_IH IH Hp := apply IH; [ exact Hp | discriminate ].
-    
+    (* Three ways to close a goal with the induction hypothesis:
+       1. IHps0 directly  (have validateFunc p false = true)
+       2. IHps directly   (have validateFunc p true = true, state is S _)
+       3. IHps via mono   (have validateFunc p false = true, promote with monotonicity) *)
+    Ltac finish IHps IHps0 Hp :=
+      first [ apply IHps0; exact Hp
+            | apply IHps; [ exact Hp | discriminate ]
+            | apply IHps; [ apply validateFuncZeroImpliesNonZero; exact Hp | discriminate ] ].
+
     intros p. induction p; split.
     all: try reflexivity; intros Hp s; destruct IHp as [ IHps IHps0 ]; simpl.
-    - intro Hs. apply IHps.
-      + exact Hp.
-      + destruct s as [|s']; [ contradiction | rewrite Nat.add_succ_r; discriminate ].
-    - destruct n; simpl.
-      { apply IHps0. cbn in Hp. exact Hp. }
-      cbn in Hp. apply IHps; [ exact Hp | discriminate ].
-    - intro Hs. destruct n; simpl; cbn in Hp.
-      + apply IHps0. exact Hp.
-      + apply IHps; [
-            exact Hp |
-            destruct s as [|s']; [ contradiction | discriminate ] ].
+    (* AddThen true: n+s > 0 since s > 0 *)
+    - intro Hs. apply IHps; [ exact Hp |].
+      destruct s as [|s']; [ contradiction | rewrite Nat.add_succ_r; discriminate ].
+    (* AddThen false: split n=0 vs n>0 *)
+    - destruct n; cbn in Hp; finish IHps IHps0 Hp.
+    (* MulThen true: split n=0 vs n>0 *)
+    - intro Hs. destruct n; simpl; cbn in Hp;
+        [ finish IHps IHps0 Hp
+        | apply IHps; [ exact Hp |
+            destruct s as [|s']; [ contradiction | discriminate ] ] ].
+    (* MulThen false: need destruct s then n *)
     - destruct s; cbn in Hp.
-      { rewrite Nat.mul_0_r. apply IHps0. exact Hp. }
-      destruct n.
-      + rewrite Nat.mul_0_l. apply IHps0. exact Hp.
-      + cbn. apply IHps; [
-        apply validateFuncZeroImpliesNonZero; exact Hp |
-        discriminate].
+      { rewrite Nat.mul_0_r. finish IHps IHps0 Hp. }
+      destruct n; [ rewrite Nat.mul_0_l | cbn ]; finish IHps IHps0 Hp.
+    (* DivThen true: n=0 impossible, n=1 preserves nonzero, n>=2 use IHps0 *)
     - intro Hs. destruct n; simpl; cbn in Hp; try discriminate.
       destruct n; simpl; cbn in Hp.
       + rewrite Nat.div_1_r.
-        destruct s as [|s']; [ contradiction |
-                               apply IHps; [ exact Hp | discriminate ] ].
-      + apply IHps0. exact Hp.
+        destruct s as [|s']; [ contradiction | finish IHps IHps0 Hp ].
+      + finish IHps IHps0 Hp.
+    (* DivThen false: similar structure *)
     - destruct n; simpl; try discriminate.
       destruct n; simpl; cbn in Hp.
       + rewrite Nat.div_1_r.
-        destruct s as [|s'];
-          [ apply IHps0; exact Hp |
-            apply IHps;
-            [ apply validateFuncZeroImpliesNonZero; exact Hp |
-              discriminate]].
-      + apply IHps0. exact Hp.
-    - intro Hs. destruct s; simpl; try contradiction. cbn in Hp. apply IHps0.
-      exact Hp.
+        destruct s as [|s']; finish IHps IHps0 Hp.
+      + finish IHps IHps0 Hp.
+    (* VidThen true: s must be nonzero *)
+    - intro Hs. destruct s; simpl; [ contradiction |].
+      cbn in Hp. finish IHps IHps0 Hp.
+    (* VidThen false: Hp is false=true, vacuous *)
     - destruct s; simpl; try discriminate.
-    - intro Hs. destruct n; simpl; cbn in Hp;
-        [ apply IHps0; exact Hp | apply IHps; [ exact Hp | discriminate ] ].
-    - destruct n; simpl; cbn in Hp;
-        [ apply IHps0; exact Hp | apply IHps; [ exact Hp | discriminate ] ].
+    (* SetToThen true & false: split on n, identical logic *)
+    - intro Hs. destruct n; simpl; cbn in Hp; finish IHps IHps0 Hp.
+    - destruct n; simpl; cbn in Hp; finish IHps IHps0 Hp.
   Qed.
       
 
