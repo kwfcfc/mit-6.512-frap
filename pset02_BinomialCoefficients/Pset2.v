@@ -57,13 +57,13 @@ Module Impl.
      because the recursive call [fact_nat n'] operates on [n'], which is a subterm
      of [n].
    *)
-  
+
   Fixpoint fact_nat (n : nat) : nat :=
     match n with
     | O => 1
     | S n' => (n' + 1) * (fact_nat n')
     end.
-  
+
   (*
      In this pset, however, we want to use the binary representation of natural
      numbers, which is called "N" in Rocq.  This representation stores numbers as
@@ -135,14 +135,18 @@ Module Impl.
   (* Exercise: Define a simple exponentiation function in the same style, so that
      "exp base n" equals "base^n". *)
 
-  Definition exp(base: N): N -> N. Admitted.
+  Definition exp(base: N): N -> N :=
+    recurse by cases
+    | 0 => 1
+    | n + 1 => base * recurse
+  end.
 
   (* Once you define "exp", you can replace "Admitted." below by "Proof. equality. Qed." *)
-  Lemma test_exp_2_3: exp 2 3 = 8. Admitted.
-  Lemma test_exp_3_2: exp 3 2 = 9. Admitted.
-  Lemma test_exp_4_1: exp 4 1 = 4. Admitted.
-  Lemma test_exp_5_0: exp 5 0 = 1. Admitted.
-  Lemma test_exp_1_3: exp 1 3 = 1. Admitted.
+  Lemma test_exp_2_3: exp 2 3 = 8. Proof. equality. Qed.
+  Lemma test_exp_3_2: exp 3 2 = 9. Proof. equality. Qed.
+  Lemma test_exp_4_1: exp 4 1 = 4. Proof. equality. Qed.
+  Lemma test_exp_5_0: exp 5 0 = 1. Proof. equality. Qed.
+  Lemma test_exp_1_3: exp 1 3 = 1. Proof. equality. Qed.
 
   (* Here's another recursive function defined in the same style to apply a
      function f to a range of values:
@@ -231,13 +235,28 @@ Module Impl.
   Lemma seq_spec: forall f count i start, i < count -> ith i (seq f count start) = f (start + i).
   Proof.
     induct count; simplify.
-  Admitted.
+    - linear_arithmetic.                      (* i < 0 is not possible *)
+    - assert (Hi: i = 0 \/ i > 0) by lia. destruct Hi as [Heq | Hgt].
+      + unfold_recurse (seq f) count. subst i. simpl. rewrite N.add_0_r.
+        reflexivity.
+      + unfold_recurse (seq f) count.
+        replace i with (i - 1 + 1) by linear_arithmetic.
+        (* case i > 0, i - 1 can be unfolded *)
+        unfold_recurse ith (i - 1). rewrite IHcount. f_equal. linear_arithmetic.
+        (* case i - 1 < count is inferred from H *)
+        linear_arithmetic.
+  Qed.
 
   (* Exercise: Prove that if the index is out of bounds, "ith" returns 0. *)
   Lemma ith_out_of_bounds_0: forall i l, len l <= i -> ith i l = 0.
   Proof.
-  Admitted.
-
+    induct i; simpl.
+    - intros l. destruct l; simpl. { reflexivity. }
+      intro. linear_arithmetic. (* The n :: l' case is not possible *)
+    - induct l; intro H; simpl; unfold_recurse ith i; try reflexivity.
+      (* Use H for the length a :: l *)
+      apply IHi. simpl in H. linear_arithmetic.
+  Qed.
 
   (* Binomial coefficients *)
   (* ********************* *)
@@ -335,16 +354,37 @@ Module Impl.
 
   Lemma fact_nonzero: forall n, n! <> 0.
   Proof.
-  Admitted.
+    induct n.
+    - simpl. linear_arithmetic.
+    - unfold_recurse fact n. apply N.neq_mul_0. split.
+      + linear_arithmetic.
+      + exact IHn.
+  Qed.
+
+  Lemma fact_is_integer: forall n k, 0 < k <= n -> (k | n!).
+  Proof.
+    induct n; simplify; try linear_arithmetic.
+    assert (Hk: 0 < k <= n \/ k = n + 1) by linear_arithmetic.
+    unfold_recurse fact n.
+    cases Hk; simplify.
+    - apply IHn in Hk. destruct Hk as [t Ht]. rewrite Ht.
+      rewrite N.mul_assoc. exists ((n + 1) * t). reflexivity.
+    - rewrite Hk. exists (n!). rewrite N.mul_comm. reflexivity.
+  Qed.
 
   Lemma Cn0: forall n, C n 0 = 1.
   Proof.
-  Admitted.
+    intro n. unfold C. simpl.
+    rewrite N.mul_1_r. rewrite N.sub_0_r. rewrite N.div_same.
+    try reflexivity. apply fact_nonzero.
+  Qed.
 
   Lemma Cnn: forall n, C n n = 1.
   Proof.
-  Admitted.
-
+    intro n. unfold C. rewrite N.sub_diag. simpl.
+    rewrite N.mul_1_l. rewrite N.div_same. try reflexivity.
+    apply fact_nonzero.
+  Qed.
 
   (* It's somewhat surprising that in the definition of C(n, k),
 
@@ -482,7 +522,46 @@ Module Impl.
   Lemma bcoeff_correct: forall n k, k <= n -> bcoeff n k = C n k.
   Proof.
     induct k; simplify.
-  Admitted.
+    (* the case where n = 0 and k has to be 0 too. *)
+    { rewrite Cn0. reflexivity. }
+    (* Transform C (n + 1) k into C n k * (n - k) / (k + 1) *)
+    unfold C. rewrite N.sub_add_distr. unfold_recurse fact k.
+    rewrite N.mul_assoc.
+    (* Multiply n - k on both denominator and numerator *)
+    About N.Div0.div_mul_cancel_l. assert (Hnk: n - k <> 0) by linear_arithmetic.
+    rewrite <- (N.Div0.div_mul_cancel_r (n!) ((n - k - 1)! * (k + 1) * k!) (n - k) Hnk).
+    replace ((n - k - 1)! * (k + 1) * k! * (n - k))
+      with ((n - k - 1)! * (n - k) * k! * (k + 1)) by linear_arithmetic.
+    assert (Hfactorial: (n - k - 1)! * (n - k) = (n - k)!).
+    { replace (n - k) with (n - k - 1 + 1) by linear_arithmetic.
+      unfold_recurse fact (n - k - 1). rewrite N.mul_comm.
+      replace (n - k - 1 + 1 - 1) with (n - k - 1) by linear_arithmetic.
+      (* replace the n - k - 1 + 1 back to n - k *)
+      replace (n - k - 1 + 1) with (n - k) by linear_arithmetic.
+      reflexivity. }
+    rewrite Hfactorial.
+    assert (Hk: k <= n) by linear_arithmetic.
+    (* call c is integer to destruct n! as two parts *)
+    pose proof (C_is_integer n k Hk) as HCint. apply IHk in Hk.
+    unfold_recurse (bcoeff n) k. rewrite Hk. unfold C. destruct HCint as [n1 HC1].
+
+    (* First we need to prove (n - k)! and k! are non zero. *)
+    assert (Hnk1: (n - k)! <> 0) by apply fact_nonzero.
+    assert (Hk1: k! <> 0) by apply fact_nonzero.
+    assert (Hnkfact: (n - k)! * k! <> 0) by nia.
+
+    rewrite HC1. rewrite (N.div_mul n1 ((n - k)! * k!) Hnkfact).
+    rewrite (N.mul_comm n1 ((n - k)! * k!)).
+    (* now ((n - k)! * k!) has been moved to the front of both denominator and
+       numerator. *)
+
+    (* rewrite n1 * (n - k) as (n1 * (n - k)) *)
+    About N.mul_assoc.
+    rewrite <- (N.mul_assoc ((n - k)! * k!) n1 (n - k)).
+    rewrite (N.Div0.div_mul_cancel_l
+               (n1 * (n - k)) (k + 1) ((n - k)! * k!) Hnkfact).
+    reflexivity.
+  Qed.
 
 
   (* All binomial coefficients for a given n *)
@@ -571,6 +650,12 @@ Module Impl.
 
   (* Time Compute all_coeffs_fast 200. takes 0.35s on my computer *)
 
+  Lemma all_coeffs_fast_length: forall n, len (all_coeffs_fast n) = n + 1.
+  Proof.
+    induct n; simplify. { reflexivity. }
+    unfold_recurse all_coeffs_fast n. unfold nextLine. cbn. rewrite seq_len.
+    rewrite IHn. linear_arithmetic.
+  Qed.
 
   (* Exercise: Let's prove that all_coeffs_fast is correct.
      Note that you can assume Pascal's rule to prove this. *)
@@ -581,7 +666,30 @@ Module Impl.
       k <= n ->
       ith k (all_coeffs_fast n) = C n k.
   Proof.
-  Admitted.
+    intro Hp. induct n; simplify.
+    { replace k with 0 by linear_arithmetic. simpl. rewrite Cn0. reflexivity. }
+    assert (Hk: k = 0 \/ k = n + 1 \/ 1 <= k <= n) by linear_arithmetic. cases Hk.
+    - (* k = 0, the result is 1 *)
+      subst. unfold_recurse all_coeffs_fast n. unfold nextLine. cbn.
+      rewrite Cn0. reflexivity.
+    - (* k = n + 1 case, use the length lemma to get the tail *)
+      subst. rewrite Cnn. unfold_recurse all_coeffs_fast n. unfold nextLine.
+      unfold_recurse ith n. rewrite seq_spec.
+      replace (1 + n - 1) with n by linear_arithmetic. rewrite IHn. rewrite Cnn.
+      rewrite ith_out_of_bounds_0. { reflexivity. }
+      all: try rewrite all_coeffs_fast_length; try linear_arithmetic.
+    - (* 1 <= k <= n case, use Pascal's rule to get the previous two line ... *)
+      unfold_recurse all_coeffs_fast n. unfold nextLine.
+      replace k with (k - 1 + 1) by linear_arithmetic.
+      unfold_recurse ith (k - 1). rewrite seq_spec.
+      + (* replace back those linear addition and subtraction of k *)
+        replace (k - 1 + 1) with k by linear_arithmetic.
+        replace (1 + (k - 1)) with k by linear_arithmetic.
+        (* now use Pascal's rule and induction hypothesis to finish *)
+        rewrite (Hp n k Hk). rewrite IHn. rewrite IHn. { reflexivity. }
+        all: linear_arithmetic.
+      + rewrite all_coeffs_fast_length. linear_arithmetic.
+  Qed.
 
   (* ----- THIS IS THE END OF PSET2 ----- All exercises below this line are optional. *)
 
