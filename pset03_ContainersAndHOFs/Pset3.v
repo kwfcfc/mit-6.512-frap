@@ -625,12 +625,15 @@ Module Impl.
   Proof.
     intros tr s Hbst. induct tr; simpl; try easy; simpl in Hbst;
       destruct Hbst as [Hd [Hl Hr]]. repeat split.
-    - apply IHtr1 in Hl. apply tree_forall_conjuction in Hl as [Hs _].
-      exact Hs.
+    - apply IHtr1 in Hl. apply tree_forall_conjuction in Hl as [Hs _]. exact Hs.
     - exact Hd.
-    - apply IHtr2 in Hr. apply tree_forall_conjuction in Hr as [Hs _].
-      exact Hs.
+    - apply IHtr2 in Hr. apply tree_forall_conjuction in Hr as [Hs _]. exact Hs.
   Qed.
+
+  (* Helper: from a bst subtree hypothesis, extract one component of
+     the conjunction in tree_forall (uses bst_implies + tree_forall_conjuction). *)
+  Ltac bst_forall_extract H :=
+    apply bst_implies in H; apply tree_forall_conjuction in H as [? ?]; assumption.
 
   (* Next, let's prove that elements of the left subtree of a
      BST node are less than the node's data and that all
@@ -643,17 +646,21 @@ Module Impl.
       bst (Node l d r) s ->
       tree_forall (fun x => x < d) l /\ tree_forall (fun x => d < x) r.
   Proof.
-    intros l d r s H. simpl in H. destruct H as [Hd [Hl Hr]]. split.
-    - apply bst_implies in Hl. apply tree_forall_conjuction in Hl as [_ Hless].
-      exact Hless.
-    - apply bst_implies in Hr. apply tree_forall_conjuction in Hr as [_ Hmore].
-      exact Hmore.
+    intros l d r s H. simpl in H. destruct H as [Hd [Hl Hr]]. split;
+      [ bst_forall_extract Hl | bst_forall_extract Hr ].
   Qed.
 
   (* Here is another convenient property: if two sets are the
      same, then a bst representing one also represents the
      other.  Hint: [rewrite] and related tactics can be used
      with logical equivalence, not just equality! *)
+
+  (* Helper: given bst tr P and (forall x, P x <-> Q x), produce bst for
+     a subtree whose predicate is P /\ R, lifting the iff to Q /\ R. *)
+  Ltac bst_iff_subtree IH HPQ H :=
+    let HPQ' := fresh "HPQ'" in
+    assert (HPQ' : forall x : Z, _ <-> _) by (intro; apply and_iff_compat_r, HPQ);
+    exact (IH _ _ H HPQ').
 
   Lemma bst_iff : forall tr P Q,
       bst tr P ->
@@ -666,13 +673,9 @@ Module Impl.
 
     repeat split; simpl in HBP; destruct HBP as [Hd [Hl Hr]].
     - apply HPQ. exact Hd.
-    (* two more assertions to extend the equivalence. *)      
-    - assert (HPQl: forall x : Z, P x /\ x < d <-> Q x /\ x < d).
-      { intro x; apply and_iff_compat_r, HPQ. }
-      apply IHtr1 in HPQl; [ exact HPQl | exact Hl ].
-    - assert (HPQr: forall x : Z, P x /\ d < x <-> Q x /\ d < x).
-      { intro x; apply and_iff_compat_r, HPQ. }
-      apply IHtr2 in HPQr; [ exact HPQr | exact Hr ].
+    (* extend the equivalence to subtree predicates P /\ (< d) and P /\ (d <) *)
+    - bst_iff_subtree IHtr1 HPQ Hl.
+    - bst_iff_subtree IHtr2 HPQ Hr.
   Qed.
 
   (* Let's prove something about the way we can map over binary search
@@ -687,6 +690,21 @@ Module Impl.
      original tree.
      *)
 
+  (* Common Leaf case: an empty bst mapped through an invertible function
+     still represents the empty set. *)
+  Lemma bst_map_leaf : forall (P Q : Z -> Prop) (f g : Z -> Z),
+      (forall x, ~ P x) ->
+      left_inverse g f ->
+      (forall x, P x <-> Q (f x)) ->
+      forall x, ~ Q x.
+  Proof.
+    intros P Q f g HBP Hinv HPQ x HQ.
+    apply (HBP (g x)). apply (HPQ (g x)).
+    unfold left_inverse, compose in Hinv.
+    pose proof (f_equal (fun h => h x) Hinv) as Hpt. cbn in Hpt.
+    rewrite Hpt. exact HQ.
+  Qed.
+
   Theorem bst_strict_monotone_increasing : forall tr P Q f g,
       bst tr P ->
       left_inverse g f ->
@@ -695,24 +713,18 @@ Module Impl.
       bst (tree_map f tr) Q.
   Proof.
     intros tr P Q f g. induct tr.
-    - intros HBP Hinv Hmono HPQ. simpl in HBP |-*. intro x. specialize (HBP (g x)).
-      specialize (HPQ (g x)). intro. apply HBP. apply HPQ.
-      unfold left_inverse in Hinv. unfold compose in Hinv.
-      (* pose the proof from Hinv *)
-      pose proof (f_equal (fun h => h x) Hinv) as Hpt. cbn in Hpt. rewrite Hpt. unfold id.
-      exact H.
+    - intros HBP Hinv Hmono HPQ. simpl in HBP |-*.
+      exact (bst_map_leaf P Q f g HBP Hinv HPQ).
     - intros HBP Hinv Hmono HPQ. simpl in HBP |-*. destruct HBP as [Hd [Hl Hr]].
       repeat split.
       + apply HPQ. exact Hd.
-      (* rewrite the HPQl and prove it with monotonicity, then apply IHtr1 *)
+      (* lift the predicate equivalence through monotonicity for each subtree *)
       + assert (HPQl: forall x : Z, P x /\ x < d <-> Q (f x) /\ f x < f d).
         { intro x; rewrite (Hmono x d); apply and_iff_compat_r; now apply HPQ. }
-        apply (IHtr1 (fun x : Z => P x /\ x < d) (fun x : Z => Q x /\ x < f d)
-                 f g Hl Hinv Hmono HPQl).
+        apply (IHtr1 _ _ f g Hl Hinv Hmono HPQl).
       + assert (HPQr: forall x : Z, P x /\ d < x <-> Q (f x) /\ f d < f x).
         { intro x; rewrite (Hmono d x); apply and_iff_compat_r; now apply HPQ. }
-        apply (IHtr2 (fun x : Z => P x /\ d < x) (fun x : Z => Q x /\ f d < x)
-                     f g Hr Hinv Hmono HPQr).
+        apply (IHtr2 _ _ f g Hr Hinv Hmono HPQr).
   Qed.
 
   (* Monotone functions can be characterized as monotone increasing or
@@ -726,6 +738,12 @@ Module Impl.
      the ordered property the resulting tree must be mirrored.
      *)
 
+  (* Helper: rewrite x < y <-> f x > f y into x < y <-> f y < f x *)
+  Local Lemma gt_lt_flip : forall f,
+      (forall x y : Z, x < y <-> f x > f y) ->
+      (forall x y : Z, x < y <-> f y < f x).
+  Proof. intros f Hm x y. rewrite (Hm x y). apply Z.gt_lt_iff. Qed.
+
   Theorem bst_strict_monotone_decreasing_mirror : forall tr P Q f g,
       bst tr P ->
       left_inverse g f ->
@@ -734,36 +752,20 @@ Module Impl.
       bst (mirror (tree_map f tr)) Q.
   Proof.
     intros tr P Q f g. induct tr.
-    - intros HBP Hinv Hmono HPQ. simpl in HBP |-*. intro x. specialize (HBP (g x)).
-      specialize (HPQ (g x)). intro. apply HBP. apply HPQ.
-      unfold left_inverse in Hinv. unfold compose in Hinv.
-      (* pose the proof from Hinv *)
-      pose proof (f_equal (fun h => h x) Hinv) as Hpt. cbn in Hpt. rewrite Hpt. unfold id.
-      exact H.
+    - intros HBP Hinv Hmono HPQ. simpl in HBP |-*.
+      exact (bst_map_leaf P Q f g HBP Hinv HPQ).
     - intros HBP Hinv Hmono HPQ. simpl in HBP |-*. destruct HBP as [Hd [Hl Hr]].
+      pose proof (gt_lt_flip f Hmono) as Hmono'.
       repeat split.
       + apply HPQ. exact Hd.
-      (* rewrite the HPQl and prove it with monotonicity, then apply IHtr1 *)
+      (* mirror swaps subtrees: right subtree (d < x) maps to left (f x < f d) *)
       + assert (HPQr: forall x : Z, P x /\ d < x <-> Q (f x) /\ f x < f d).
-        { intro x. split.
-          * intro H. destruct H as [HP Hxd]. rewrite (Hmono d x) in Hxd.
-            split; [ apply HPQ in HP; exact HP | rewrite Z.gt_lt_iff in Hxd; apply Hxd ].
-          * intro H. destruct H as [HQ Hfxd]. rewrite <- Z.gt_lt_iff in Hfxd.
-            rewrite <- (Hmono d x) in Hfxd.
-            split; [ apply HPQ in HQ; exact HQ | exact Hfxd ].
-        }
-        apply (IHtr2 (fun x : Z => P x /\ d < x) (fun x : Z => Q x /\ x < f d)
-                 f g Hr Hinv Hmono HPQr).
+        { intro x; rewrite (Hmono' d x); apply and_iff_compat_r; now apply HPQ. }
+        apply (IHtr2 _ _ f g Hr Hinv Hmono HPQr).
+      (* left subtree (x < d) maps to right (f d < f x) *)
       + assert (HPQl: forall x : Z, P x /\ x < d <-> Q (f x) /\ f d < f x).
-        { intro x. split.
-          * intro H. destruct H as [HP Hxd]. rewrite (Hmono x d) in Hxd.
-            split; [ apply HPQ in HP; exact HP | rewrite Z.gt_lt_iff in Hxd; apply Hxd ].
-          * intro H. destruct H as [HQ Hfxd]. rewrite <- Z.gt_lt_iff in Hfxd.
-            rewrite <- (Hmono x d) in Hfxd.
-            split; [ apply HPQ in HQ; exact HQ | apply Hfxd ].
-        }
-        apply (IHtr1 (fun x : Z => P x /\ x < d) (fun x : Z => Q x /\ f d < x)
-                     f g Hl Hinv Hmono HPQl).
+        { intro x; rewrite (Hmono' x d); apply and_iff_compat_r; now apply HPQ. }
+        apply (IHtr1 _ _ f g Hl Hinv Hmono HPQl).
   Qed.
 
   (* [member] computes whether [a] is in [tr], but to do so it *relies* on the
@@ -787,19 +789,16 @@ Module Impl.
     intros tr s a Hb. induct tr; simpl.
     { split; intro H; try discriminate H.
       simpl in Hb. apply Hb in H. easy. }
+    (* Lt/Gt cases: the compare constraint makes s a equivalent to
+       the subtree predicate (s a /\ ordering), so rewrite and recurse. *)
     cases (compare a d); simpl in Hb |-*.
     - destruct Hb as [_ [Hb _]].
-      (* rewrite the s with extra less than ... *)
-      assert (Hl: s a <-> (fun x : Z => s x /\ x < d) a).
-      { split; intro; easy. }
-      rewrite Hl.
-      apply (IHtr1 (fun x : Z => s x /\ x < d) a Hb).
+      assert (Hl: s a <-> (fun x : Z => s x /\ x < d) a) by (split; intro; easy).
+      rewrite Hl. apply (IHtr1 _ a Hb).
     - destruct Hb as [Hd _]. subst a. easy.
     - destruct Hb as [_ [_ Hb]].
-      assert (Hr: s a <-> (fun x : Z => s x /\ d < x) a).
-      { split; intro; easy. }
-      rewrite Hr.
-      apply (IHtr2 (fun x : Z => s x /\ d < x) a Hb).
+      assert (Hr: s a <-> (fun x : Z => s x /\ d < x) a) by (split; intro; easy).
+      rewrite Hr. apply (IHtr2 _ a Hb).
   Qed.
 
   (* Next week, we will look at insertion and deletion in
