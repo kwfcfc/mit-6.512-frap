@@ -22,8 +22,9 @@ Require Import Frap Pset4.Pset4Sig.
 
 (* We will study binary trees of natural numbers only for convenience.
    Almost everything here would also work with an arbitrary type
-   [t], but with [nat] you can use [linear_arithmetic] to prove
-   goals about ordering of multiple elements (e.g., transitivity). *)
+   [t] equipped with a strict total order. We factor out the
+   ordering properties so that replacing [nat] only requires
+   changing three definitions below. *)
 Local Notation t := nat.
 
 Module Impl.
@@ -182,9 +183,51 @@ Module Impl.
    * calling [exfalso]. This, for example, enables you to apply lemmas that end in
    * [-> False]. Of course, only do this if the hypotheses are contradictory. *)
 
-  (* Other tactics used in our solution: apply, apply with, apply with in
-   * (including multiple "with" clauses like in [use_bst_iff]), cases, propositional,
-     linear_arithmetic, simplify, trivial, try, induct, equality, rewrite, assert. *)
+  (* ===== Strict total order interface =====
+     All BST proofs only depend on these three properties.
+     To switch from [nat] to another ordered type, change only these
+     three definitions and the [compare] function. *)
+
+  Definition lt_irrefl := Nat.lt_irrefl.         (* forall x, ~ x < x *)
+  Definition lt_trans  := Nat.lt_trans.           (* forall x y z, x<y -> y<z -> x<z *)
+  Definition lt_trichotomy := Nat.lt_trichotomy.  (* forall x y, x<y \/ x=y \/ y<x *)
+
+  (* Derived order lemmas *)
+  Lemma lt_asymm : forall x y : t, x < y -> ~ y < x.
+  Proof. intros. intro. exact (lt_irrefl _ (lt_trans _ _ _ H H0)). Qed.
+
+  Lemma lt_neq : forall x y : t, x < y -> x <> y.
+  Proof. intros. intro. subst. exact (lt_irrefl _ H). Qed.
+
+  Lemma gt_neq : forall x y : t, y < x -> x <> y.
+  Proof. intros. intro. subst. exact (lt_irrefl _ H). Qed.
+
+  (* Automated order tactic: solves goals using irrefl/asymm/trans *)
+  Ltac order :=
+    subst; try assumption;
+    try (exfalso;
+      match goal with
+      | H: ?x < ?x |- _ => exact (lt_irrefl _ H)
+      | H1: ?x < ?y, H2: ?y < ?x |- _ => exact (lt_asymm _ _ H1 H2)
+      | H1: ?x < ?y, H2: ?y < ?z, H3: ?z < ?x |- _ =>
+          exact (lt_asymm _ _ H1 (lt_trans _ _ _ H3 H2))
+      | H1: ?x < ?y, H2: ?y < ?z, H3: ?z < ?x |- _ =>
+          exact (lt_asymm _ _ (lt_trans _ _ _ H1 H2) H3)
+      end);
+    try match goal with
+    | |- ?x < ?z => eapply lt_trans; eassumption
+    | H: ?x < ?y |- ?x <> ?y => exact (lt_neq _ _ H)
+    | H: ?y < ?x |- ?x <> ?y => exact (gt_neq _ _ H)
+    | |- ?x <> ?y => exact (lt_neq _ _ ltac:(eapply lt_trans; eassumption))
+    | |- ?x <> ?y => exact (gt_neq _ _ ltac:(eapply lt_trans; eassumption))
+    | |- ?x <> ?y =>
+        let Heq := fresh in intro Heq; subst;
+        match goal with H1: ?a < ?a |- _ => exact (lt_irrefl _ H1) end
+    end.
+
+  (* Trichotomy: case-split on the ordering of x and y *)
+  Ltac trichotomy x y :=
+    destruct (lt_trichotomy x y) as [? | [? | ?]].
 
   (* Warm-up exercise: rebalancing rotations *)
 
@@ -217,13 +260,13 @@ Module Impl.
       repeat split; try easy.
       (* some other goals can be solved using lt_trans with d r x *)
       + use_bst_iff HA. intro x. rewrite and_assoc. propositional.
-        apply (Nat.lt_trans _ l _ H1 Hld).
+        eapply lt_trans; eassumption.
       + (* B case is easy because the goal and hypotheses are just rewritten in
            different order. *)
         use_bst_iff HB. intro x. rewrite and_assoc. rewrite and_assoc. easy.
       + use_bst_iff HR. intro x. rewrite and_assoc. propositional.
         (* The second goals are exactly part of Hypotheses *)
-        apply (Nat.lt_trans _ d _ Hld H1).
+        eapply lt_trans; eassumption.
   Qed.
 
   (* There is a hint in the signature file that completely gives away the proofs
@@ -236,33 +279,26 @@ Module Impl.
   Proof.
     intros tr s a H. induct tr; simpl.
     1: { (* Leaf case *)
-      simpl in H. split; try (right; reflexivity). split;
-      (* whether it is inserted into the left or the right of a Leaf, this must
-         hold because in the Leaf, no s and a are true. *)
-      intro x; unfold not; intro Hf; destruct Hf as [Hor Hxa];
-        destruct Hor as [Hsx | Hxea];
-        [ apply (H x); exact Hsx | linear_arithmetic
-        | apply (H x); exact Hsx | linear_arithmetic ].
-      }
+      simpl in H. split; [ right; reflexivity | ]. split;
+      intro x; intro Hf; destruct Hf as [[Hsx | Hxea] Hxa];
+        [ exact (H x Hsx) | subst x; exact (lt_irrefl _ Hxa)
+        | exact (H x Hsx) | subst x; exact (lt_irrefl _ Hxa) ]. }
 
     cases (compare a d); simpl; simpl in H; destruct H as [Hd [Hl Hr]].
-    - repeat split.
+    - (* a < d: insert left *)
+      repeat split.
       + left. exact Hd.
       + apply (IHtr1 _ a) in Hl. simpl in Hl. use_bst_iff_assumption.
-        (* now prove when x = a, x < d is satisfied. *)
         propositional. subst x. exact l.
-      + (* this cases should be false because a < d and it is inserted to the
-           right. *)
-        use_bst_iff_assumption. propositional. subst x. linear_arithmetic.
-    - repeat split; subst a;
-      (* the case when a = d, substitute all of a and simplify *)
-      try (right; reflexivity);
-        use_bst_iff_assumption; propositional; linear_arithmetic.
-    - repeat split.
+      + use_bst_iff_assumption. propositional; order.
+    - (* a = d: no change *)
+      repeat split; subst a; try (right; reflexivity);
+        use_bst_iff_assumption; propositional; order.
+    - (* d < a: insert right *)
+      repeat split.
       + left. exact Hd.
-      + use_bst_iff_assumption. propositional. linear_arithmetic.
-      + (* this is the case when x = a, x > d is satisfied. *)
-        apply (IHtr2 _ a) in Hr. simpl in Hr. use_bst_iff_assumption.
+      + use_bst_iff_assumption. propositional; order.
+      + apply (IHtr2 _ a) in Hr. simpl in Hr. use_bst_iff_assumption.
         propositional. subst x. exact l.
   Qed.
 
@@ -302,33 +338,34 @@ Module Impl.
   Lemma rightmost_none_leaf : forall tr s, bst tr s -> rightmost tr = None -> tr = Leaf.
   Proof.
     intros tr s Hbst Hright. destruct tr; [ reflexivity | ].
-    simpl in Hright. destruct (rightmost tr2).
-    all: discriminate Hright.
+    simpl in Hright. destruct (rightmost tr2); discriminate Hright.
   Qed.
 
+  (* Using ~(n < x) instead of x <= n avoids dependence on nat's [le]. *)
   Lemma rightmost_is_max : forall tr s n,
-      bst tr s -> rightmost tr = Some n -> forall x : t, s x -> x <= n.
+      bst tr s -> rightmost tr = Some n -> forall x : t, s x -> ~ (n < x).
   Proof.
-    intros tr s n Hbst Hright x Hsx. induct tr; simpl;
+    intros tr s n Hbst Hright x Hsx Hnx. induct tr; simpl;
       [ simpl in Hright; discriminate Hright | ].
     cases (is_leaf tr2).
     - rewrite is_leaf_prop in Heq. destruct Hbst as [Hd [Htr1 Htr2]].
-      subst tr2. inversion Hright. subst n.
-      (* Use the bst for Leaf tr2 to get an inequality. *)
-      simpl in Htr2. assert (Hcases: x <= d \/ d < x) by linear_arithmetic.
-      destruct Hcases as [Ht | Hwrong]; [ exact Ht | ].
-      exfalso. apply ((Htr2 x) (conj Hsx Hwrong)).
+      subst tr2. simpl in Hright. inversion Hright. subst n.
+      simpl in Htr2.
+      trichotomy x d.
+      + exact (lt_asymm _ _ H Hnx).
+      + subst x. exact (lt_irrefl _ Hnx).
+      + exact ((Htr2 x) (conj Hsx H)).
     - destruct Hbst as [Hd [Htr1 Htr2]]. simpl in Hright.
-      (* disgard the case where rightmost tr2 is None *)
       cases (rightmost tr2).
-      + assert (Hcases: x <= d \/ d < x) by linear_arithmetic.
-        inversion Hright. rewrite H0 in Heq0.
-        pose proof (rightmost_in_bst tr2 _ n Htr2 Heq0) as Hn. simpl in Hn.
-        destruct Hn as [Hsn Hdn]. destruct Hcases as [Hxd | Hdx];
-          [ linear_arithmetic | ].
-        apply (IHtr2 _ n Htr2 Hright x). split; [ exact Hsx | exact Hdx ].
-      + pose proof (rightmost_none_leaf tr2 _ Htr2 Heq0) as Hwrong.
-        rewrite Hwrong in Heq. discriminate Heq.
+      + inversion Hright. subst n0.
+        pose proof (rightmost_in_bst tr2 _ n Htr2 Heq0) as HnR.
+        simpl in HnR. destruct HnR as [_ Hdn].
+        trichotomy x d.
+        * exact (lt_asymm _ _ (lt_trans _ _ _ H Hdn) Hnx).
+        * subst x. exact (lt_asymm _ _ Hdn Hnx).
+        * apply (IHtr2 _ n Htr2 Hright x (conj Hsx H) Hnx).
+      + pose proof (rightmost_none_leaf tr2 _ Htr2 Heq0).
+        rewrite H in Heq. discriminate Heq.
   Qed.
 
   Lemma delete_rightmost_preserve_bst :
@@ -343,15 +380,16 @@ Module Impl.
     }
     cbn. rewrite Heq. simpl in Hbst, Hright.
     destruct Hbst as [Hd [Htr1 Htr2]]. cases (rightmost tr2).
-    - simpl. inversion Hright. subst n0. repeat split.
+    - simpl. inversion Hright. subst n0.
+      pose proof (rightmost_in_bst tr2 _ n Htr2 Heq0) as HnR.
+      simpl in HnR. destruct HnR as [_ Hdn].
+      repeat split.
       + exact Hd.
-      + (* use rightmost in bst to prove d <> n *)
-        apply (rightmost_in_bst tr2 _ n Htr2) in Heq0. linear_arithmetic.
-      + use_bst_iff_assumption. propositional.
-        apply (rightmost_in_bst tr2 _ n Htr2) in Heq0. linear_arithmetic.
+      + exact Hdn.
+      + use_bst_iff_assumption. propositional;
+          eapply lt_trans; eassumption.
       + apply (IHtr2 _ n Htr2) in Hright. use_bst_iff_assumption. propositional.
-    - (* when tr2 is not Leaf, rightmost r2 should not be None *)
-      apply (rightmost_none_leaf tr2 _ Htr2) in Heq0. subst tr2.
+    - apply (rightmost_none_leaf tr2 _ Htr2) in Heq0. subst tr2.
       discriminate Heq.
   Qed.
 
@@ -364,22 +402,27 @@ Module Impl.
     pose proof (rightmost_in_bst l _ n Hl Hright) as Hn. simpl in Hn.
     destruct Hn as [Hsn Hnd]. repeat split.
     - exact Hsn.
-    - apply (delete_rightmost_preserve_bst l _ n Hl) in Hright.
-      linear_arithmetic.
-    - (* bst iff is not working here, because now r tree can accept more
-           elements that ranges from n to d *)
-      apply (delete_rightmost_preserve_bst l _ n Hl) in Hright.
-      use_bst_iff_assumption. propositional.
-      all: linear_arithmetic.
-    - pose proof (rightmost_is_max l _ n Hl Hright) as Hn. simpl in Hn.
-      apply (delete_rightmost_preserve_bst l _ n Hl) in Hright.
-      (* Call bst iff to pick a specific function *)
-      use_bst_iff_assumption. propositional;
-        [ linear_arithmetic | linear_arithmetic | ].
-      assert (Hcases: x < d \/ d < x) by linear_arithmetic.
-      destruct Hcases as [Hlt | Hgt].
-      + pose proof ((Hn x) (conj H Hlt)) as Hcontra. linear_arithmetic.
-      + exact Hgt.
+    - (* n <> d from n < d *)
+      exact (lt_neq _ _ Hnd).
+    - (* left subtree *)
+      pose proof (delete_rightmost_preserve_bst l _ n Hl Hright) as Hdel.
+      simpl in Hdel. use_bst_iff Hdel. propositional; order.
+    - (* right subtree *)
+      pose proof (rightmost_is_max l _ n Hl Hright) as Hmax.
+      use_bst_iff Hr. intros x; split.
+      + intros [Hsx Hdx]. repeat split.
+        * exact Hsx.
+        * exact (gt_neq _ _ Hdx).
+        * trichotomy x n.
+          { exfalso. exact (lt_asymm _ _ H (lt_trans _ _ _ Hnd Hdx)). }
+          { subst x. exfalso. exact (lt_asymm _ _ Hnd Hdx). }
+          { exact H. }
+      + intros [[Hsx Hxned] Hnx]. split.
+        * exact Hsx.
+        * trichotomy x d.
+          { exfalso. exact (Hmax x (conj Hsx H) Hnx). }
+          { subst x. contradiction. }
+          { exact H. }
   Qed.
 
   Lemma bst_delete : forall tr s a, bst tr s ->
@@ -393,27 +436,33 @@ Module Impl.
     }
 
     cases (compare a d); simpl.
-    - destruct H as [Hd [Hl Hr]]. repeat split; try exact Hd;
-      try linear_arithmetic.
-      + apply (IHtr1 _ a) in Hl. simpl in Hl. use_bst_iff_assumption.
-        propositional.
-      + (* discriminate this case because a is less than d *)
-        use_bst_iff_assumption. propositional. subst a. linear_arithmetic.
-    - subst a. cases (rightmost tr1).
+    - (* a < d *)
+      destruct H as [Hd [Hl Hr]]. repeat split.
+      + exact Hd.
+      + intro Hda. subst d. exact (lt_irrefl _ l).
+      + apply (IHtr1 _ a) in Hl. simpl in Hl.
+        use_bst_iff_assumption. propositional.
+      + use_bst_iff_assumption. propositional; order.
+    - (* a = d *)
+      subst a. cases (rightmost tr1).
       + apply (merge_with_rightmost d tr1 tr2 _ n H Heq).
       + destruct H as [_ [Htr1 Htr2]].
         pose proof (rightmost_none_leaf tr1 _ Htr1 Heq) as Hleaf. subst tr1.
-        unfold merge_ordered. simpl. use_bst_iff_assumption. propositional;
-        [ linear_arithmetic | ].
-        simpl in Htr1. assert (Hcases: x < d \/ d < x) by linear_arithmetic.
-        destruct Hcases as [Hlt | hgt];
-          [ exfalso; apply ((Htr1 x) (conj H0 Hlt)) | exact hgt].
-    - repeat split.
-      + destruct H as [Hd _]. exact Hd.
-      + linear_arithmetic.
-      + destruct H as [_ [Htr1 Htr2]]. use_bst_iff_assumption. propositional.
-        subst x. linear_arithmetic.
-      + destruct H as [_ [_ Htr2]]. apply (IHtr2 _ a) in Htr2. simpl in Htr2.
+        unfold merge_ordered. simpl. use_bst_iff Htr2. intros x; split.
+        * intros [Hsx Hdx]. split; [ exact Hsx | ].
+          exact (gt_neq _ _ Hdx).
+        * intros [Hsx Hxnd]. split; [ exact Hsx | ].
+          simpl in Htr1.
+          trichotomy x d.
+          { exfalso. exact ((Htr1 x) (conj Hsx H)). }
+          { subst x. contradiction. }
+          { exact H. }
+    - (* d < a *)
+      destruct H as [Hd [Hl Hr]]. repeat split.
+      + exact Hd.
+      + intro Hda. subst d. exact (lt_irrefl _ l).
+      + use_bst_iff_assumption. propositional; order.
+      + apply (IHtr2 _ a) in Hr. simpl in Hr.
         use_bst_iff_assumption. propositional.
   Qed.
 
