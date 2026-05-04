@@ -155,10 +155,22 @@ Module Impl.
      above, using the names written to the rights of the lines above as the
      constructor names.  We have included ValuesConst to give you a hint.
   *)
+
   Inductive values: arith -> valuation -> nat -> Prop :=
   | ValuesConst: forall v n1 n2,
       n1 = n2 ->
       values (Const n1) v n2
+  | ValuesVarDefined: forall v x a,
+      v $? x = Some a ->
+      values (Var x) v a
+  | ValuesVarUndefined: forall v x a,
+      v $? x = None ->
+      values (Var x) v a
+  | ValuesPlus: forall v e1 e2 a1 a2 a,
+      values e1 v a1 ->
+      values e2 v a2 ->
+      a = a1 + a2 ->
+      values (Plus e1 e2) v a
   .
 
   (* Note that the following alternative would also work for ValuesConst and
@@ -201,20 +213,26 @@ Module Impl.
     (* Once you define the four constructors for "values", you can uncomment
        the script below. Make sure you understand how it relates to the proof
        tree above! *)
-    (*
     eapply ValuesPlus with (a1 := 2) (a2 := a - 2).
     - eapply ValuesVarDefined. simplify. equality.
     - eapply ValuesVarUndefined. simplify. equality.
     - linear_arithmetic.
-      *)
-  Admitted.
+  Qed.
 
   (* Now, let's prove that "interp" and "values" are equivalent.
      First, [interp -> values]: *)
   Theorem interp_to_values: forall e v a,
       interp e v a -> values e v a.
   Proof.
-  Admitted.
+    intros e v a H. induct e.
+    - simpl in H. subst a. apply ValuesConst. reflexivity.
+    - cases (v $? x).
+      + apply ValuesVarDefined. simpl in H. rewrite Heq in H. now subst a.
+      + apply ValuesVarUndefined. simpl in H. now rewrite Heq in H.
+    - simpl in H. destruct H as [a1 [a2 [He1 [He2 Ha]]]].
+      eapply ValuesPlus with (a1 := a1) (a2 := a2);
+        [ apply IHe1 | apply IHe2 | ]; easy.
+  Qed.
 
   (* To prove the other direction, we have a choice: we can either induct on
      [e] or directly on the proof of [values e v a], because [values] is an
@@ -227,7 +245,12 @@ Module Impl.
   Proof.
     induct 1; (* ← do not change this line *)
       simplify.
-  Admitted.
+    - symmetry. exact H.
+    - rewrite H. reflexivity.
+    - rewrite H. easy.
+    - exists a1. exists a2. repeat split;
+        [ exact IHvalues1 | exact IHvalues2 | exact H1 ].
+  Qed.
 
   (* Now let's see how things look with an induction on e.  In this simple case,
      it's very similar: *)
@@ -235,8 +258,14 @@ Module Impl.
       values e v a -> interp e v a.
   Proof.
     induct e; (* ← not the best, but for the sake of the exercise do not change this line *)
-      simplify.
-  Admitted.
+      simplify; inversion H.     (* use inversion to split the inductive type *)
+    1: subst n. reflexivity.
+    1,2: rewrite H1; reflexivity.
+    exists a1. exists a2. repeat split;
+    [ apply IHe1; exact H2|
+      apply IHe2; exact H3|
+      exact H6].
+    Qed.
 
   (* Let's define nondeterministic big-step semantics for evaluating a command.
      Define [eval] as an Inductive Prop such that [eval v1 c v2] means
@@ -247,6 +276,28 @@ Module Impl.
   Inductive eval: valuation -> cmd -> valuation -> Prop :=
   | EvalSkip: forall v,
       eval v Skip v
+  | EvalAssign: forall v x e n,
+      values e v n ->
+      eval v (Assign x e) (v $+ (x, n))
+  | EvalSeq : forall v c1 v1 c2 v2,
+      eval v c1 v1 -> eval v1 c2 v2 ->
+      eval v (Sequence c1 c2) v2
+  | EvalIfTrue : forall v e n thn els v',
+      values e v n -> n <> 0 ->
+      eval v thn v' ->
+      eval v (If e thn els) v'
+  | EvalIfFalse : forall v e thn els v',
+      values e v 0 ->
+      eval v els v' ->
+      eval v (If e thn els) v'
+  | EvalWhileTrue : forall v e n body v' v'',
+      values e v n -> n <> 0 ->
+      eval v body v' ->
+      eval v' (While e body) v'' ->
+      eval v (While e body) v''
+  | EvalWhileFalse : forall v e body,
+      values e v 0 ->
+      eval v (While e body) v
   .
 
   (* Hint: Many of the proofs below will depend on definitions we ask you to
@@ -274,7 +325,11 @@ Module Impl.
   Lemma read_last_value: forall x v c n,
       values (Var x) (v $+ (x, c)) n -> n = c.
   Proof.
-  Admitted.
+    intros x v c n H. inversion H; subst a; subst x0; subst v0;
+      rewrite lookup_add_eq in H1;
+      [ inversion H1 | | discriminate H1 | ]; reflexivity.
+  Qed.
+
 
   (* Hint: This next theorem is a bit boring -- it's about 30 lines of "invert",
      "simplify", "discriminate", "equality", "linear_arithmetic" and
@@ -289,7 +344,23 @@ Module Impl.
   Theorem the_answer_is_indeed_42:
     forall v, eval $0 the_answer_is_42 v -> v $? "answer" = Some 42.
   Proof.
-  Admitted.
+    unfold the_answer_is_42. simplify. invert H.
+    invert H5.                  (* The two If sequences *)
+    invert H3.                  (* The Assignment for x *)
+    invert H6;                  (* The last if for answer *)
+      [ invert H9; invert H6; rewrite lookup_add_eq;
+        [ reflexivity | reflexivity ]
+      | ].
+    invert H2.
+    - apply read_last_value in H4. subst n0. invert H5;
+        [ rewrite lookup_empty in H0; discriminate H0 | ].
+      (* The second case is to discriminate 0 = n + n *)
+      invert H10. invert H4. apply read_last_value in H2,H3,H7. subst a1.
+      subst a2. symmetry in H7. apply Nat.eq_add_0 in H7. linear_arithmetic.
+    - apply read_last_value in H6. subst n. invert H9.
+      (* This case is to prove that tmp and x should not be zero *)
+      apply read_last_value in H7. invert H3. discriminate H0.
+  Qed.
 
   (* Here's another example program. If we run it on a valuation that is
      undefined for "x", it will read the undefined variable "x" to decide
@@ -305,7 +376,31 @@ Module Impl.
   Proof.
     unfold loop_of_unknown_length.
     induct n; simplify.
-  Admitted.
+    - assert (Hmap: ($0 $+ ("counter", initialCounter + 0)) =
+                      ($0 $+ ("counter", initialCounter)))
+        by (rewrite Nat.add_0_r; reflexivity).
+      rewrite Hmap. apply EvalWhileFalse. apply ValuesVarUndefined.
+      rewrite lookup_add_ne; [ apply lookup_empty | easy ].
+    - apply EvalWhileTrue with (n := 1)
+                               (v' := ($0 $+ ("counter", initialCounter + 1))).
+      (* Use a non zero n valuation for var x and induction hypotheses *)
+      + apply ValuesVarUndefined. rewrite lookup_add_ne;
+          [ apply lookup_empty | easy ].
+      + linear_arithmetic.
+      + assert (Hmap: ($0 $+ ("counter", initialCounter + 1)) =
+                        ($0 $+ ("counter", initialCounter)
+                           $+ ("counter", initialCounter + 1))) by maps_equal.
+        (* Add a more key "counter" to use the prop for eval *)
+        rewrite Hmap. apply EvalAssign.
+        apply ValuesPlus with (a1 := initialCounter) (a2 := 1).
+        * apply ValuesVarDefined. now apply lookup_add_eq.
+        * apply ValuesConst. reflexivity.
+        * reflexivity.
+      + assert (Hn: S n = 1 + n) by linear_arithmetic. rewrite Hn.
+        rewrite Nat.add_assoc.
+        (* These are middle steps in the loop that satisfy the induction hypotheses *)
+        apply IHn.
+  Qed.
 
   (* Wherever this TODO_FILL_IN is used, you should replace it with your own code. *)
   Axiom TODO_FILL_IN: Prop.
@@ -340,7 +435,10 @@ Module Impl.
         (exists r, interp e v1 r /\ r <> 0 /\ run fuel' v1 c1 v2) \/
         (interp e v1 0 /\ run fuel' v1 c2 v2)
       | While e c1 =>
-        TODO_FILL_IN
+          (* TODO_FILL_IN *)
+          (exists r, interp e v1 r /\ r <> 0 /\
+                  (exists vmid, run fuel' v1 c1 vmid /\ run fuel' vmid c v2)) \/
+            (interp e v1 0 /\ v1 = v2)
       end
     end.
 
@@ -352,7 +450,25 @@ Module Impl.
       run fuel v1 c v2 ->
       eval v1 c v2.
   Proof.
-  Admitted.
+    induct fuel; simplify; [ exfalso; exact H | ].
+    destruct c.
+    - subst v2. apply EvalSkip.
+    - destruct H as [a [He Hv]]. subst v2. apply interp_to_values in He.
+      now apply EvalAssign.
+    - destruct H as [vmid [Hc1 Hc2]]. apply IHfuel in Hc1,Hc2.
+      now apply EvalSeq with (v1 := vmid).
+    - (* If *) destruct H as [[r [He [Hnr Hr]]] | [He Hr]];
+                 apply interp_to_values in He; apply IHfuel in Hr.
+      + (* True *) now apply EvalIfTrue with (n := r).
+      + (* False *) now apply EvalIfFalse.
+    - (* While *)
+      destruct H as [[r [He [Hnr [vmid [Hrv1 Hrv2]]]]] | [He Heq]];
+        apply interp_to_values in He.
+      + apply IHfuel in Hrv1,Hrv2.
+        now apply EvalWhileTrue with (n := r) (v' := vmid).
+      + subst v2. apply EvalWhileFalse. exact He.
+  Qed.
+
 
   (* To prove the other direction, we will need the following lemma, which shows
      that excess fuel isn't an issue.
@@ -379,7 +495,28 @@ Module Impl.
       run fuel1 v1 c v2 ->
       run fuel2 v1 c v2.
   Proof.
-  Admitted.
+    intros fuel1 fuel2 v1 c v2. induct fuel1; simpl; intros Hleq Hfuel1;
+      [ exfalso; exact Hfuel1 | ].
+    (* destruct fuel2 to represent it as S fuel... case *)
+    destruct fuel2; [ linear_arithmetic | ].
+    assert (Hlt: fuel1 <= fuel2) by (apply (le_S_n fuel1 fuel2 Hleq)).
+    destruct c; cbn.
+    - subst v2. reflexivity.
+    - exact Hfuel1.
+    - destruct Hfuel1 as [vmid [Hr1 Hc2]]. exists vmid. split.
+      + apply (IHfuel1 fuel2 v1 c1 vmid Hlt Hr1).
+      + apply (IHfuel1 fuel2 vmid c2 v2 Hlt Hc2).
+    - destruct Hfuel1 as [[r [He [Hnr Hc1]]] | [He Hc2]].
+      + left. exists r. repeat split;
+          [ exact He | exact Hnr | apply (IHfuel1 fuel2 v1 c1 v2 Hlt Hc1) ].
+      + right. split; [ exact He | apply (IHfuel1 fuel2 v1 c2 v2 Hlt Hc2) ].
+    - destruct Hfuel1 as [[r [He [Hnr [vmid [Hcmid Hwhile]]]]] | [He Heq]].
+      + left. exists r. repeat split;
+          [ exact He | exact Hnr | ]. exists vmid. split;
+          [ apply (IHfuel1 fuel2 v1 c vmid Hlt Hcmid) |
+            apply (IHfuel1 fuel2 vmid (While e c) v2 Hlt Hwhile) ].
+      + right. split; [ exact He | exact Heq ].
+  Qed.
 
   (* For the other direction, we could naively start proving it like this: *)
   Theorem eval_to_run: forall v1 c v2,
@@ -412,7 +549,8 @@ Module Impl.
       wrun v Skip v.
   Lemma WRunSkip: WRunSkip_statement.
   Proof.
-  Admitted.
+    unfold WRunSkip_statement. intro v. unfold wrun. exists 1. cbn. reflexivity.
+  Qed.
 
   Definition WRunAssign_statement : Prop :=
     forall v x e a,
@@ -420,7 +558,10 @@ Module Impl.
       wrun v (Assign x e) (v $+ (x, a)).
   Lemma WRunAssign: WRunAssign_statement.
   Proof.
-  Admitted.
+    unfold WRunAssign_statement. intros v x e a He. unfold wrun.
+    exists 1. cbn.                   (* One fuel will do *)
+    exists a. split; [ exact He | reflexivity ].
+  Qed.
 
   Definition WRunSeq_statement : Prop :=
     forall v c1 v1 c2 v2,
@@ -429,30 +570,84 @@ Module Impl.
       wrun v (Sequence c1 c2) v2.
   Lemma WRunSeq: WRunSeq_statement.
   Proof.
-  Admitted.
+    intros v c1 v1 c2 v2 Hr1 Hr2. unfold wrun in *.
+    destruct Hr1 as [fuel1 Hc1]. destruct Hr2 as [fuel2 Hc2].
+    exists (fuel1 + fuel2 + 1). destruct fuel1.
+    - simpl.        (* fuel1 and fuel2 can't be both zero *)
+      rewrite Nat.add_1_r. cbn. exists v1. split.
+      + now apply (run_monotone 0 fuel2 v c1 v1). (* use monotone to get Hc1 *)
+      + exact Hc2.
+    - simpl. exists v1. split.
+      + apply (run_monotone (S fuel1) (fuel1 + fuel2 + 1) v c1 v1);
+          [ linear_arithmetic | exact Hc1 ].
+      + apply (run_monotone fuel2 (fuel1 + fuel2 + 1) v1 c2 v2);
+          [ linear_arithmetic | exact Hc2 ].
+  Qed.
 
   (* For the next few lemmas, we've left you the job of stating the theorem as
      well as proving it. *)
 
-  Definition WRunIfTrue_statement : Prop. Admitted.
+  Definition WRunIfTrue_statement : Prop :=
+    forall v e c1 v2 c2,
+      (exists r, interp e v r /\ r <> 0 /\ wrun v c1 v2) ->
+      wrun v (If e c1 c2) v2.
   Lemma WRunIfTrue: WRunIfTrue_statement.
   Proof.
-  Admitted.
+    unfold WRunIfTrue_statement. intros v e c1 v2 c2 Hr.
+    destruct Hr as [r [He [Hnr Hr1]]]. unfold wrun in *.
+    destruct Hr1 as [fuel Hc1].
+    exists (S fuel). cbn. left.
+    exists r. now repeat split.
+  Qed.
 
-  Definition WRunIfFalse_statement : Prop. Admitted.
+  Definition WRunIfFalse_statement : Prop :=
+    forall v e c1 v1 c2,
+      interp e v 0 /\ wrun v c2 v1 ->
+      wrun v (If e c1 c2) v1.
   Lemma WRunIfFalse: WRunIfFalse_statement.
   Proof.
-  Admitted.
+    unfold WRunIfTrue_statement. intros v e c1 v1 c2 Hr.
+    destruct Hr as [He Hr2]. unfold wrun in *.
+    destruct Hr2 as [fuel Hc2].
+    exists (S fuel). cbn. now right.
+  Qed.
 
-  Definition WRunWhileTrue_statement : Prop. Admitted.
+  Definition WRunWhileTrue_statement : Prop :=
+    forall v e c v1,
+      (exists r, interp e v r /\ r <> 0 /\
+              (exists vmid, wrun v c vmid /\ wrun vmid (While e c) v1)) ->
+      wrun v (While e c) v1.
   Lemma WRunWhileTrue: WRunWhileTrue_statement.
   Proof.
-  Admitted.
+    unfold WRunWhileTrue_statement.
+    intros v e c v1 H. destruct H as [r [He [Hnr Hloop]]].
+    destruct Hloop as [vmid [Hc Hwhile]]. unfold wrun in *.
+    destruct Hc as [fuel1 Hc]. destruct Hwhile as [fuel2 Hwhile].
+    exists (fuel1 + fuel2 + 1). destruct fuel1.
+    - simpl. rewrite Nat.add_1_r. cbn. left. exists r.
+      repeat split; [ exact He | exact Hnr | ].
+      (* fuel2 and fuel1 can't both be zero. *)
+      exists vmid. split.
+      + now apply (run_monotone 0 fuel2 v c vmid).
+      + exact Hwhile.
+    - simpl. left. exists r. repeat split; [ exact He | exact Hnr | ]. exists vmid. split.
+      + apply (run_monotone (S fuel1) (fuel1 + fuel2 + 1) v c vmid);
+          [ linear_arithmetic | exact Hc ].
+      + apply (run_monotone fuel2 (fuel1 + fuel2 + 1) vmid (While e c) v1);
+          [ linear_arithmetic | exact Hwhile ].
+  Qed.
 
-  Definition WRunWhileFalse_statement : Prop. Admitted.
+  Definition WRunWhileFalse_statement : Prop :=
+    forall v e c v1,
+      interp e v 0 /\ v = v1 ->
+      wrun v (While e c) v1.
   Lemma WRunWhileFalse: WRunWhileFalse_statement.
   Proof.
-  Admitted.
+    unfold WRunWhileFalse_statement. intros v e c v1 H. destruct H as [He Heq].
+    unfold wrun in *.
+    (* While x = 0 is simply skip *)
+    exists 1. cbn. now right.
+  Qed.
 
   (* Now, thanks to these helper lemmas, proving the direction from eval to wrun
      becomes easy: *)
@@ -460,7 +655,17 @@ Module Impl.
       eval v1 c v2 ->
       wrun v1 c v2.
   Proof.
-  Admitted.
+    induct 1.
+    - apply WRunSkip.
+    - apply WRunAssign. now apply values_to_interp.
+    - now apply WRunSeq with (v1 := v1).
+    - apply WRunIfTrue. exists n. repeat split;
+        [ now apply values_to_interp | exact H0 | exact IHeval ].
+    - apply WRunIfFalse. split; [ now apply values_to_interp | exact IHeval ].
+    - apply WRunWhileTrue. exists n. repeat split;
+        [ now apply values_to_interp | exact H0 | exists v' ]. now split.
+    - apply WRunWhileFalse. split; [ now apply values_to_interp | reflexivity ].
+  Qed.
 
   (* Remember when we said earlier that [induct 1] does induction on the proof
      of [eval], whereas [induct c] does induction on the program itself?  Try
