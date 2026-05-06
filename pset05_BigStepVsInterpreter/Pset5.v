@@ -173,6 +173,82 @@ Module Impl.
       values (Plus e1 e2) v a
   .
 
+  (** ===== 自动化辅助 tactic（Part 1: arith 相关） ===== *)
+  (* 以下 tactic 用于自动化 interp/values 之间的等价性证明。
+     设计目标：添加新的 arith constructor（如 Times, Minus）时，
+     大部分证明无需修改，新 case 会被自动处理。 *)
+
+  (* break_hyps: 递归分解假设中的存在量词、合取、析取和矛盾。
+     这是所有自动化 tactic 的基础构建块。
+     匹配模式说明：
+     - [H: exists _, _ |- _] : H 形如 [exists x, P x]，destruct 拆出 witness x 和命题 P x
+     - [H: _ /\ _ |- _]      : H 形如 [P /\ Q]，destruct 拆成两个独立假设
+     - [H: _ \/ _ |- _]       : H 形如 [P \/ Q]，destruct 产生两个子目标（P 分支和 Q 分支）
+     - [H: False |- _]        : 假设矛盾，contradiction 直接关闭目标
+     使用 repeat 递归处理嵌套结构（如 [exists x, exists y, P /\ Q]），
+     直到没有更多可分解的假设为止。 *)
+  Ltac break_hyps :=
+    repeat match goal with
+    | H: exists _, _ |- _ => destruct H
+    | H: _ /\ _ |- _ => destruct H
+    | H: _ \/ _ |- _ => destruct H
+    | H: False |- _ => contradiction
+    end.
+
+  (* solve_interp_to_values: 将 interp (Fixpoint) 的证明转换为 values (Inductive) 的证明。
+     在 [induction e; intros; simpl in *] 之后调用，处理每个 arith constructor 的 case。
+     按优先级尝试三种证明模式：
+
+     1. Const-like（目标中无递归、假设是直接等式 [a = n]）：
+        subst 消除等式，econstructor 自动选择 ValuesConst，reflexivity 完成。
+        例如：[H: a = 3 |- values (Const 3) v a] → subst → [|- values (Const 3) v 3]
+
+     2. Plus-like（假设含嵌套 [exists a1 a2, interp e1 v a1 /\ interp e2 v a2 /\ ...]）：
+        break_hyps 分解所有 exists/and，econstructor 选择 ValuesPlus（或类似 constructor），
+        eauto 自动应用归纳假设 IHe1, IHe2 来证明子项。
+        ★ 新增的递归 arith constructor（如 Times, Minus）只要 interp 定义使用
+          exists + and 的标准模式，就会自动被此分支覆盖，无需修改 ★
+
+     3. Var（假设含 [match v $? x with Some n => a = n | None => True end]）：
+        对 [v $? x] 做 case analysis（destruct ... eqn:? 保留等式）：
+        - Some 分支：eapply ValuesVarDefined，congruence 统一 [v $? x = Some n] 和 [a = n]
+        - None 分支：eapply ValuesVarUndefined，congruence 统一 [v $? x = None]
+        此模式通过匹配目标 [values (Var ?x) ?v _] 精确识别 Var case。 *)
+  Ltac solve_interp_to_values :=
+    try (subst; econstructor; reflexivity);
+    try (break_hyps; econstructor; eauto; fail);
+    match goal with
+    | |- values (Var ?x) ?v _ =>
+      destruct (v $? x) eqn:?;
+      [ eapply ValuesVarDefined; congruence
+      | eapply ValuesVarUndefined; congruence ]
+    end.
+
+  (* solve_values_to_interp: 将 values (Inductive) 的证明转回 interp (Fixpoint) 的证明。
+     在归纳（对证明树 [induct 1] 或对表达式 [induct e; ...; inversion H]）之后调用。
+     按优先级尝试三种证明模式：
+
+     1. 等式类（如 ValuesConst 的 [n1 = n2] → 目标 [n2 = n1]）：
+        congruence 处理对称/传递等式，一步完成。
+
+     2. Var 的 match 类（目标形如 [match v $? x with Some n => ... | None => True end]）：
+        匹配模式 [H: _ $? _ = _ |- _] 精确找到 lookup 等式假设
+        （如 [H: v $? x = Some a] 或 [H: v $? x = None]），
+        rewrite H 将目标中的 match 化简为具体分支，auto 关闭剩余目标。
+        用 fail 包裹确保：如果此模式匹配但未完全解决目标，不会跳到下一步。
+
+     3. 递归情况（如 ValuesPlus 产生的 exists 目标）：
+        [repeat eexists] 逐层引入存在量词的 witness（交给 Coq unification 确定值），
+        [repeat split] 分解所有合取，
+        [eauto] 利用上下文中的归纳假设和等式假设填充所有子目标。
+        ★ 新增的递归 arith constructor 会自动被此模式覆盖 ★ *)
+  Ltac solve_values_to_interp :=
+    try congruence;
+    try (match goal with
+         | H: _ $? _ = _ |- _ => rewrite H; auto
+         end; fail);
+    repeat eexists; repeat split; eauto.
+
   (* Note that the following alternative would also work for ValuesConst and
      ValuesPlus:
 
@@ -224,14 +300,7 @@ Module Impl.
   Theorem interp_to_values: forall e v a,
       interp e v a -> values e v a.
   Proof.
-    intros e v a H. induct e.
-    - simpl in H. subst a. apply ValuesConst. reflexivity.
-    - cases (v $? x).
-      + apply ValuesVarDefined. simpl in H. rewrite Heq in H. now subst a.
-      + apply ValuesVarUndefined. simpl in H. now rewrite Heq in H.
-    - simpl in H. destruct H as [a1 [a2 [He1 [He2 Ha]]]].
-      eapply ValuesPlus with (a1 := a1) (a2 := a2);
-        [ apply IHe1 | apply IHe2 | ]; easy.
+    induction e; intros; simpl in *; solve_interp_to_values.
   Qed.
 
   (* To prove the other direction, we have a choice: we can either induct on
@@ -244,12 +313,7 @@ Module Impl.
       values e v a -> interp e v a.
   Proof.
     induct 1; (* ← do not change this line *)
-      simplify.
-    - symmetry. exact H.
-    - rewrite H. reflexivity.
-    - rewrite H. easy.
-    - exists a1. exists a2. repeat split;
-        [ exact IHvalues1 | exact IHvalues2 | exact H1 ].
+      simpl; solve_values_to_interp.
   Qed.
 
   (* Now let's see how things look with an induction on e.  In this simple case,
@@ -258,14 +322,8 @@ Module Impl.
       values e v a -> interp e v a.
   Proof.
     induct e; (* ← not the best, but for the sake of the exercise do not change this line *)
-      simplify; inversion H.     (* use inversion to split the inductive type *)
-    1: subst n. reflexivity.
-    1,2: rewrite H1; reflexivity.
-    exists a1. exists a2. repeat split;
-    [ apply IHe1; exact H2|
-      apply IHe2; exact H3|
-      exact H6].
-    Qed.
+      simplify; inversion H; subst; solve_values_to_interp.
+  Qed.
 
   (* Let's define nondeterministic big-step semantics for evaluating a command.
      Define [eval] as an Inductive Prop such that [eval v1 c v2] means
@@ -446,27 +504,151 @@ Module Impl.
 
   Local Hint Constructors eval : core.
 
+  (** ===== 自动化辅助 tactic（Part 2: cmd 相关） ===== *)
+  (* 以下 tactic 用于自动化 run/eval/wrun 之间的等价性证明。
+     设计目标：添加新的 cmd constructor（如 Unset）时，
+     只需修改 eval/run 的定义和添加对应的 WRun 引理，
+     而 run_to_eval、run_monotone 等核心证明无需改动。 *)
+
+  (* run_to_eval_solver: 将 run (Fixpoint) 的证明转换为 eval (Inductive) 的证明。
+     在 [induction fuel; ...; destruct c] 之后，对每个 cmd case 调用。
+
+     工作流程：
+     1. break_hyps + subst: 分解 run 展开后的 exists/and/or 结构，消除等式。
+        例如 Skip 的 [H: v1 = v2] 会被 subst 消除，
+        Sequence 的 [exists vmid, run fuel v1 c1 vmid /\ run fuel vmid c2 v2]
+        会被 break_hyps 拆成 [vmid], [H1: run fuel v1 c1 vmid], [H2: run fuel vmid c2 v2]。
+     2. interp → values: eval 使用 values 而非 interp 来评估表达式，
+        匹配模式 [H: interp _ _ _ |- _] 将每个 interp 假设通过 interp_to_values 转换。
+        例如 Assign 的 [H: interp e v1 a] 变成 [H: values e v1 a]。
+     3. run → eval: 匹配 [H: run _ _ _ _ |- _] 通过归纳假设 IHfuel 将递归的 run 转为 eval。
+        例如 [H: run fuel v1 c1 vmid] 变成 [H: eval v1 c1 vmid]。
+     4. eauto 7: 利用 [Hint Constructors eval] 自动选择正确的 eval constructor。
+        深度 7 足以覆盖 EvalWhileTrue（最深的 constructor，需统一 4 个前提）。
+        eauto 的搜索过程：尝试 eapply EvalWhileTrue/EvalSeq/...，
+        然后递归地用 eassumption 匹配各前提。
+
+     ★ 添加新的 cmd constructor 时：
+       只要 run 的新 case 使用 exists/and/or/interp 的标准模式，
+       且 eval 的新 constructor 已注册为 Hint，此 tactic 自动覆盖 ★ *)
+  Ltac run_to_eval_solver :=
+    break_hyps; subst;
+    repeat match goal with
+    | H: interp _ _ _ |- _ => apply interp_to_values in H
+    end;
+    (* 通过类型模式匹配找到归纳假设 IH，而非依赖具体名称。
+       匹配模式 [IH: forall _ _ _, run _ _ _ _ -> eval _ _ _] 精确匹配
+       "对任意 v1 c v2，run fuel v1 c v2 → eval v1 c v2" 形状的假设。
+       这样即使 Coq 将 IH 命名为 IHfuel、IHn 或其他名称，都能正确找到。 *)
+    repeat match goal with
+    | H: run _ _ _ _ |- _ =>
+        match goal with
+        | IH: forall _ _ _, run _ _ _ _ -> eval _ _ _ |- _ =>
+            apply IH in H
+        end
+    end;
+    eauto 7.
+
+  (* mono_rebuild_core: 递归重建目标的 exists/and/or 结构。
+     参数 run_handler 是一个 tactic，用于处理叶子位置的 [run] 目标。
+     目前在 run_monotone 中使用：传入 [idtac]（fuel 已由 upgrade_fuel 预处理）。
+
+     注意：Ltac1 中将复杂 tactic 作为参数传递给递归 tactic 时存在已知问题
+     （tactic closure 在递归调用中可能丢失上下文）。
+     因此，combine_wrun 使用独立的 [wrun_rebuild] tactic（将 run_monotone 逻辑硬编码），
+     而非 [mono_rebuild_core ltac:(run_handler)]。
+
+     递归重建过程（自顶向下匹配目标结构）：
+     - try subst: 消除上下文中的等式假设
+     - try eassumption: 如果目标与某假设一致（含 unification），直接完成
+     - try reflexivity: 处理 [v = v] 等自反等式
+     - try run_handler: 尝试用传入的 handler 处理 [run] 目标
+
+     结构匹配（match goal with）：
+     - [|- _ \/ _]: 析取目标（如 If/While 的两种情况）。
+       用 first 尝试 left 再 right，利用 Ltac 的 backtracking 机制：
+       如果 left 分支的递归重建失败，自动回退尝试 right。
+     - [|- exists _, _]: 存在量词目标。
+       eexists 引入 unification variable，递归处理子目标。
+     - [|- _ /\ _]: 合取目标。split 分解后递归处理两个子目标。
+     - 默认: eassumption 或 reflexivity。
+
+     终止性：每次递归，目标严格变小（剥离一层 or/exists/and），保证终止。 *)
+  (* 注意：使用 eassumption 而非 assumption，因为 eexists 引入的 unification variable
+     需要在匹配时进行统一（unification），而 assumption 不支持 unification variable，
+     只有 eassumption 会尝试将目标中的 evar 与假设统一。
+     例如：eexists 后目标为 [interp e v ?a]，假设为 [H: interp e v 42]，
+     assumption 失败（?a ≠ 42），eassumption 成功（统一 ?a := 42）。 *)
+  Ltac mono_rebuild_core run_handler :=
+    try subst;
+    try eassumption;
+    try reflexivity;
+    try run_handler;
+    match goal with
+    | |- _ \/ _ =>
+        first [ left; mono_rebuild_core run_handler
+              | right; mono_rebuild_core run_handler ]
+    | |- exists _, _ =>
+        eexists; mono_rebuild_core run_handler
+    | |- _ /\ _ =>
+        split; [ mono_rebuild_core run_handler
+               | mono_rebuild_core run_handler ]
+    | _ => eassumption || reflexivity
+    end.
+
+  (* upgrade_fuel: 将假设中所有 [run fuel1 v c v2] 升级为 [run fuel2 v c v2]。
+     专用于 run_monotone 的归纳步骤，配合归纳假设 IHfuel1 使用。
+
+     匹配模式 [H: run _ ?v ?c ?v2 |- _]:
+     - 捕获任何 run 假设（不限定 fuel）
+     - ?v, ?c, ?v2 分别绑定 valuation、cmd、结果 valuation
+     - 使用 [IHfuel1 _ v c v2 ltac:(assumption) H]:
+       · IHfuel1 的类型: [forall fuel2 v1 c v2, fuel1 <= fuel2 -> run fuel1 v1 c v2 -> run fuel2 v1 c v2]
+       · 第一个 _ 留给 Coq 推断目标 fuel（通过 assumption 找到 [Hlt: fuel1 <= fuel2] 来确定）
+       · ltac:(assumption) 自动在上下文中找到 [fuel1 <= fuel2] 的证明
+       · H 是原始的 [run fuel1 ...] 假设
+     - clear + rename: 用升级后的假设替换原始假设，保持名称不变
+
+     防止无限循环：升级后 H 变为 [run fuel2 v c v2]。
+     再次匹配时，IHfuel1 期望 [run fuel1 ...]，unification 将 fuel2 与 fuel1 统一会失败
+     （因为它们是不同的变量），于是 pose proof 失败，repeat 停止。 *)
+  (* upgrade_fuel: 将假设中所有 [run fuel_old v c v2] 升级为 [run fuel_new v c v2]。
+     专用于 run_monotone 的归纳步骤。
+
+     工作流程：
+     1. 外层 match 找到一个 [run] 假设 H
+     2. 内层 match 通过类型模式找到归纳假设 IH（而非依赖名称 IHfuel1）：
+        [IH: forall _ _ _ _, _ <= _ -> run _ _ _ _ -> run _ _ _ _]
+        匹配 "对任意 fuel2 v c v2，fuel1 <= fuel2 → run fuel1 ... → run fuel2 ..."
+     3. 用 IH 升级 H 的 fuel：pose proof (IH _ v c v2 ltac:(assumption) H)
+        · 第一个 _ 由 Coq 推断（通过 assumption 找到 [fuel1 <= fuel2] 确定 fuel2）
+        · assumption 自动在上下文中找到不等式证明
+     4. clear + rename: 替换旧假设
+
+     防止无限循环：升级后 H 的 fuel 从 fuel1 变为 fuel2，
+     再次 apply IH 时 Coq 无法将 fuel2 统一为 IH 期望的 fuel1，pose proof 失败。 *)
+  Ltac upgrade_fuel :=
+    repeat match goal with
+    | H: run _ ?v ?c ?v2 |- _ =>
+        match goal with
+        | IH: forall _ _ _ _, _ <= _ -> run _ _ _ _ -> run _ _ _ _ |- _ =>
+            let H' := fresh in
+            (* 使用 eassumption 而非 assumption：
+               IH 的第一个参数 _ 是 unification variable（目标 fuel），
+               需要 eassumption 将 [fuel1 <= ?fuel2] 与 [Hlt: fuel1 <= fuel2] 统一 *)
+            pose proof (IH _ v c v2 ltac:(eassumption) H) as H';
+            clear H; rename H' into H
+        end
+    end.
+
   Theorem run_to_eval: forall fuel v1 c v2,
       run fuel v1 c v2 ->
       eval v1 c v2.
   Proof.
-    induct fuel; simplify; [ exfalso; exact H | ].
-    destruct c.
-    - subst v2. apply EvalSkip.
-    - destruct H as [a [He Hv]]. subst v2. apply interp_to_values in He.
-      now apply EvalAssign.
-    - destruct H as [vmid [Hc1 Hc2]]. apply IHfuel in Hc1,Hc2.
-      now apply EvalSeq with (v1 := vmid).
-    - (* If *) destruct H as [[r [He [Hnr Hr]]] | [He Hr]];
-                 apply interp_to_values in He; apply IHfuel in Hr.
-      + (* True *) now apply EvalIfTrue with (n := r).
-      + (* False *) now apply EvalIfFalse.
-    - (* While *)
-      destruct H as [[r [He [Hnr [vmid [Hrv1 Hrv2]]]]] | [He Heq]];
-        apply interp_to_values in He.
-      + apply IHfuel in Hrv1,Hrv2.
-        now apply EvalWhileTrue with (n := r) (v' := vmid).
-      + subst v2. apply EvalWhileFalse. exact He.
+    (* 用 induction 而非 Frap 的 induct，保持 IHfuel 通用（不被 instantiate_obviouses 特化） *)
+    induction fuel; simpl; intros v1 c v2 Hrun;
+      [ contradiction | ].
+    destruct c; run_to_eval_solver.
   Qed.
 
 
@@ -495,27 +677,14 @@ Module Impl.
       run fuel1 v1 c v2 ->
       run fuel2 v1 c v2.
   Proof.
-    intros fuel1 fuel2 v1 c v2. induct fuel1; simpl; intros Hleq Hfuel1;
+    (* 用 induction 而非 Frap 的 induct，保持 IH 通用 *)
+    induction fuel1; simpl; intros fuel2 v1 c v2 Hleq Hfuel1;
       [ exfalso; exact Hfuel1 | ].
-    (* destruct fuel2 to represent it as S fuel... case *)
     destruct fuel2; [ linear_arithmetic | ].
     assert (Hlt: fuel1 <= fuel2) by (apply (le_S_n fuel1 fuel2 Hleq)).
-    destruct c; cbn.
-    - subst v2. reflexivity.
-    - exact Hfuel1.
-    - destruct Hfuel1 as [vmid [Hr1 Hc2]]. exists vmid. split.
-      + apply (IHfuel1 fuel2 v1 c1 vmid Hlt Hr1).
-      + apply (IHfuel1 fuel2 vmid c2 v2 Hlt Hc2).
-    - destruct Hfuel1 as [[r [He [Hnr Hc1]]] | [He Hc2]].
-      + left. exists r. repeat split;
-          [ exact He | exact Hnr | apply (IHfuel1 fuel2 v1 c1 v2 Hlt Hc1) ].
-      + right. split; [ exact He | apply (IHfuel1 fuel2 v1 c2 v2 Hlt Hc2) ].
-    - destruct Hfuel1 as [[r [He [Hnr [vmid [Hcmid Hwhile]]]]] | [He Heq]].
-      + left. exists r. repeat split;
-          [ exact He | exact Hnr | ]. exists vmid. split;
-          [ apply (IHfuel1 fuel2 v1 c vmid Hlt Hcmid) |
-            apply (IHfuel1 fuel2 vmid (While e c) v2 Hlt Hwhile) ].
-      + right. split; [ exact He | exact Heq ].
+    destruct c; cbn;
+      break_hyps; upgrade_fuel;
+      mono_rebuild_core ltac:(idtac).
   Qed.
 
   (* For the other direction, we could naively start proving it like this: *)
@@ -544,24 +713,95 @@ Module Impl.
      Hint: Again, some proof automation might simplify the task (but manual proofs are
      possible too, of course).  You may find the `max` function useful. *)
 
+  (* combine_wrun: 合并 wrun 证明中的多个 fuel 值。
+     所有 WRun* 引理共用此 tactic，极大减少重复代码。
+
+     工作流程：
+     1. unfold wrun: 暴露 [exists fuel, run fuel ...] 结构
+     2. break_hyps: 分解 exists/and，得到具体的 fuel 值和 run 假设
+     3. 选择足够大的 fuel（用 first 按优先级尝试三种情况）：
+        - 两个 run 假设（如 Seq, WhileTrue）: 用 S (f1 + f2)
+          确保 f1 <= f1+f2 且 f2 <= f1+f2，run_monotone 可升级两个子 run
+        - 一个 run 假设（如 Assign, IfTrue, IfFalse）: 用 S f
+          一层 S 展开外层 run，内层 run 直接用原 fuel
+        - 无 run 假设（如 Skip, WhileFalse）: 用 1
+          一步 fuel 就足够
+     4. simpl 展开外层 run 的 match
+     5. mono_rebuild_core 递归重建目标结构
+        传入 run_handler 使用 [eapply run_monotone; [linear_arithmetic | exact H]]
+        即时将内层 run 的 fuel 从 fi 升级到 f1+f2
+
+     ★ 添加新的 cmd constructor 时：
+       只需定义新的 WRun* 引理的 statement + 一行 [combine_wrun] 证明 ★ *)
+  (* wrun_rebuild: 专用于 combine_wrun 的重建 tactic。
+     与 mono_rebuild_core 类似，但将 run_monotone 处理硬编码在内，
+     避免 Ltac1 的 tactic 参数在递归中传递时的问题。
+
+     工作流程与 mono_rebuild_core 相同，但在处理 run 目标时，
+     直接调用 wrun_run_monotone 而非依赖参数化的 run_handler。 *)
+  Ltac wrun_rebuild :=
+    try subst;
+    try eassumption;
+    try reflexivity;
+    try (match goal with
+         | H: run _ _ _ _ |- run _ _ _ _ =>
+             eapply run_monotone; [| exact H]; linear_arithmetic
+         end);
+    match goal with
+    | |- _ \/ _ =>
+        first [ left; wrun_rebuild | right; wrun_rebuild ]
+    | |- exists _, _ =>
+        eexists; wrun_rebuild
+    | |- _ /\ _ =>
+        split; [ wrun_rebuild | wrun_rebuild ]
+    | _ => eassumption || reflexivity
+    end.
+
+  (* combine_wrun: 合并 wrun 证明中的多个 fuel 值。
+     所有 WRun* 引理共用此 tactic。
+
+     工作流程：
+     1. unfold wrun: 暴露 [exists fuel, run fuel ...] 结构
+     2. break_hyps: 分解 exists/and，得到具体的 fuel 值和 run 假设
+     3. 选择足够大的 fuel（用 first 按优先级尝试三种情况）：
+        - 两个 run 假设（如 Seq, WhileTrue）: 用 S (f1 + f2)
+        - 一个 run 假设（如 Assign, IfTrue, IfFalse）: 用 S f
+        - 无 run 假设（如 Skip, WhileFalse）: 用 1
+     4. simpl 展开外层 run 的 match
+     5. mono_rebuild_core 递归重建目标结构，
+        传入 wrun_run_monotone 处理 run 子目标
+
+     ★ 添加新的 cmd constructor 时：
+       只需定义新的 WRun* 引理的 statement + 一行 [combine_wrun] 证明 ★ *)
+  Ltac combine_wrun :=
+    unfold wrun in *; break_hyps;
+    first
+    [ (* 两个 run 假设的情况 *)
+      match goal with
+      | H1: run ?f1 _ _ _, H2: run ?f2 _ _ _ |- _ =>
+          exists (S (f1 + f2)); simpl; wrun_rebuild
+      end
+    | (* 一个 run 假设的情况 *)
+      match goal with
+      | H: run ?f _ _ _ |- _ =>
+          exists (S f); simpl; wrun_rebuild
+      end
+    | (* 无 run 假设的情况 *)
+      exists 1; simpl; wrun_rebuild
+    ].
+
   Definition WRunSkip_statement : Prop :=
     forall v,
       wrun v Skip v.
   Lemma WRunSkip: WRunSkip_statement.
-  Proof.
-    unfold WRunSkip_statement. intro v. unfold wrun. exists 1. cbn. reflexivity.
-  Qed.
+  Proof. unfold WRunSkip_statement; intros; combine_wrun. Qed.
 
   Definition WRunAssign_statement : Prop :=
     forall v x e a,
       interp e v a ->
       wrun v (Assign x e) (v $+ (x, a)).
   Lemma WRunAssign: WRunAssign_statement.
-  Proof.
-    unfold WRunAssign_statement. intros v x e a He. unfold wrun.
-    exists 1. cbn.                   (* One fuel will do *)
-    exists a. split; [ exact He | reflexivity ].
-  Qed.
+  Proof. unfold WRunAssign_statement; intros; combine_wrun. Qed.
 
   Definition WRunSeq_statement : Prop :=
     forall v c1 v1 c2 v2,
@@ -569,20 +809,7 @@ Module Impl.
       wrun v1 c2 v2 ->
       wrun v (Sequence c1 c2) v2.
   Lemma WRunSeq: WRunSeq_statement.
-  Proof.
-    intros v c1 v1 c2 v2 Hr1 Hr2. unfold wrun in *.
-    destruct Hr1 as [fuel1 Hc1]. destruct Hr2 as [fuel2 Hc2].
-    exists (fuel1 + fuel2 + 1). destruct fuel1.
-    - simpl.        (* fuel1 and fuel2 can't be both zero *)
-      rewrite Nat.add_1_r. cbn. exists v1. split.
-      + now apply (run_monotone 0 fuel2 v c1 v1). (* use monotone to get Hc1 *)
-      + exact Hc2.
-    - simpl. exists v1. split.
-      + apply (run_monotone (S fuel1) (fuel1 + fuel2 + 1) v c1 v1);
-          [ linear_arithmetic | exact Hc1 ].
-      + apply (run_monotone fuel2 (fuel1 + fuel2 + 1) v1 c2 v2);
-          [ linear_arithmetic | exact Hc2 ].
-  Qed.
+  Proof. unfold WRunSeq_statement; intros; combine_wrun. Qed.
 
   (* For the next few lemmas, we've left you the job of stating the theorem as
      well as proving it. *)
@@ -592,25 +819,14 @@ Module Impl.
       (exists r, interp e v r /\ r <> 0 /\ wrun v c1 v2) ->
       wrun v (If e c1 c2) v2.
   Lemma WRunIfTrue: WRunIfTrue_statement.
-  Proof.
-    unfold WRunIfTrue_statement. intros v e c1 v2 c2 Hr.
-    destruct Hr as [r [He [Hnr Hr1]]]. unfold wrun in *.
-    destruct Hr1 as [fuel Hc1].
-    exists (S fuel). cbn. left.
-    exists r. now repeat split.
-  Qed.
+  Proof. unfold WRunIfTrue_statement; intros; combine_wrun. Qed.
 
   Definition WRunIfFalse_statement : Prop :=
     forall v e c1 v1 c2,
       interp e v 0 /\ wrun v c2 v1 ->
       wrun v (If e c1 c2) v1.
   Lemma WRunIfFalse: WRunIfFalse_statement.
-  Proof.
-    unfold WRunIfTrue_statement. intros v e c1 v1 c2 Hr.
-    destruct Hr as [He Hr2]. unfold wrun in *.
-    destruct Hr2 as [fuel Hc2].
-    exists (S fuel). cbn. now right.
-  Qed.
+  Proof. unfold WRunIfFalse_statement; intros; combine_wrun. Qed.
 
   Definition WRunWhileTrue_statement : Prop :=
     forall v e c v1,
@@ -618,36 +834,44 @@ Module Impl.
               (exists vmid, wrun v c vmid /\ wrun vmid (While e c) v1)) ->
       wrun v (While e c) v1.
   Lemma WRunWhileTrue: WRunWhileTrue_statement.
-  Proof.
-    unfold WRunWhileTrue_statement.
-    intros v e c v1 H. destruct H as [r [He [Hnr Hloop]]].
-    destruct Hloop as [vmid [Hc Hwhile]]. unfold wrun in *.
-    destruct Hc as [fuel1 Hc]. destruct Hwhile as [fuel2 Hwhile].
-    exists (fuel1 + fuel2 + 1). destruct fuel1.
-    - simpl. rewrite Nat.add_1_r. cbn. left. exists r.
-      repeat split; [ exact He | exact Hnr | ].
-      (* fuel2 and fuel1 can't both be zero. *)
-      exists vmid. split.
-      + now apply (run_monotone 0 fuel2 v c vmid).
-      + exact Hwhile.
-    - simpl. left. exists r. repeat split; [ exact He | exact Hnr | ]. exists vmid. split.
-      + apply (run_monotone (S fuel1) (fuel1 + fuel2 + 1) v c vmid);
-          [ linear_arithmetic | exact Hc ].
-      + apply (run_monotone fuel2 (fuel1 + fuel2 + 1) vmid (While e c) v1);
-          [ linear_arithmetic | exact Hwhile ].
-  Qed.
+  Proof. unfold WRunWhileTrue_statement; intros; combine_wrun. Qed.
 
   Definition WRunWhileFalse_statement : Prop :=
     forall v e c v1,
       interp e v 0 /\ v = v1 ->
       wrun v (While e c) v1.
   Lemma WRunWhileFalse: WRunWhileFalse_statement.
-  Proof.
-    unfold WRunWhileFalse_statement. intros v e c v1 H. destruct H as [He Heq].
-    unfold wrun in *.
-    (* While x = 0 is simply skip *)
-    exists 1. cbn. now right.
-  Qed.
+  Proof. unfold WRunWhileFalse_statement; intros; combine_wrun. Qed.
+
+  (* solve_eval_to_wrun: 将 eval (Inductive) 的证明转换为 wrun 的证明。
+     在 [induct 1]（对 eval 的证明树归纳）之后，对每个 eval constructor 调用。
+
+     使用 first 按优先级尝试每个 WRun 引理：
+     - WRunSkip: 匹配 [eval v Skip v]，直接完成
+     - WRunAssign: 匹配 [eval v (Assign x e) ...]，需要 values_to_interp 转换表达式
+     - WRunSeq: 匹配 [eval v (Sequence c1 c2) v2]，用 eassumption 匹配两个归纳假设
+     - WRunIfTrue/False: 匹配 [eval v (If e c1 c2) v']，
+       用 first 尝试 True 分支和 False 分支（由 backtracking 自动选择正确分支）
+     - WRunWhileTrue/False: 匹配 [eval v (While e c) v']，同上
+     每种情况用 values_to_interp 将 eval 的 values 前提转换为 interp 前提（wrun 使用 interp）。
+
+     ★ 添加新的 cmd constructor 时：
+       只需在此 tactic 中添加一个新的 [apply WRunXxx; ...] 分支 ★ *)
+  Ltac solve_eval_to_wrun :=
+    first
+    [ apply WRunSkip
+    | apply WRunAssign; apply values_to_interp; eassumption
+    | eapply WRunSeq; eassumption
+    | apply WRunIfTrue; eexists; repeat split;
+      [ apply values_to_interp; eassumption | assumption | assumption ]
+    | apply WRunIfFalse; split;
+      [ apply values_to_interp; eassumption | assumption ]
+    | apply WRunWhileTrue; eexists; repeat split;
+      [ apply values_to_interp; eassumption | assumption
+      | eexists; split; eassumption ]
+    | apply WRunWhileFalse; split;
+      [ apply values_to_interp; eassumption | reflexivity ]
+    ].
 
   (* Now, thanks to these helper lemmas, proving the direction from eval to wrun
      becomes easy: *)
@@ -655,16 +879,7 @@ Module Impl.
       eval v1 c v2 ->
       wrun v1 c v2.
   Proof.
-    induct 1.
-    - apply WRunSkip.
-    - apply WRunAssign. now apply values_to_interp.
-    - now apply WRunSeq with (v1 := v1).
-    - apply WRunIfTrue. exists n. repeat split;
-        [ now apply values_to_interp | exact H0 | exact IHeval ].
-    - apply WRunIfFalse. split; [ now apply values_to_interp | exact IHeval ].
-    - apply WRunWhileTrue. exists n. repeat split;
-        [ now apply values_to_interp | exact H0 | exists v' ]. now split.
-    - apply WRunWhileFalse. split; [ now apply values_to_interp | reflexivity ].
+    induct 1; solve_eval_to_wrun.
   Qed.
 
   (* Remember when we said earlier that [induct 1] does induction on the proof
