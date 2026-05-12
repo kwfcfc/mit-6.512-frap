@@ -80,7 +80,7 @@ fine.
   but do take the time to convince yourself that your lemmas make sense, so that
   you don't waste time using incorrect lemmas.
 
-- We have included plenty of hints below in the HINTS section of the 
+- We have included plenty of hints below in the HINTS section of the
   signature file.
 |*)
 
@@ -149,7 +149,7 @@ Local Hint Constructors Forall2 : core.
 (* Here are some definitions that we will use in the interpreter.
    Many of them have dummy cases that we do not expect to hit.
    Specifically, the benefit of all of the typing judgments is that
-   they guarantee these cases will never happen. 
+   they guarantee these cases will never happen.
  *)
 
 Definition stack_unop f (s : list stack_val) :=
@@ -163,8 +163,6 @@ Definition stack_binop f (s : list stack_val) :=
   | a::b::s' => (f a b)::s'
   | _ => (*this case never happens on well-typed programs*) s
   end.
-
-
 
 Definition stack_pop (s : list stack_val) :=
   match s with
@@ -213,7 +211,39 @@ Lemma val_flatmap_sound t1 t2 f l
     val_well_typed l (ty_list t1) ->
     val_well_typed (val_flatmap f l) (ty_list t2).
 Proof.
-Admitted.
+  intros Hx Hl. induction l;
+  [ inversion Hl |              (* val_lit is not possible for ty_list  *)
+    simpl; apply val_nil_wt |   (* val_nil is easy to prove *)
+    ].
+  simpl. invert Hl. pose proof (IHl2 H3) as Hfl2.
+  pose proof (Hx l1 H2) as Hfl1. induction (f l1); simpl.
+  1, 2: simpl in Hfl1.
+  - inversion Hfl1.        (* val_lit is not well typed. *)
+  - exact Hfl2.            (* val_nil gives exactly Hfl2. *)
+  - invert Hfl1. apply IHs2 in H5. now apply val_cons_wt.
+Qed.
+
+Lemma val_reduce_sound t1 t2 f l
+  : (forall x acc', val_well_typed x t1 ->
+               val_well_typed acc' t2 ->
+               val_well_typed (f acc' x) t2) ->
+    val_well_typed l (ty_list t1) ->
+    (forall acc, val_well_typed acc t2 ->
+            val_well_typed (val_reduce f l acc) t2).
+Proof.
+  intros Hf Hl acc Hacc. induct l; [ inversion Hl | simpl; exact Hacc | ].
+  simpl. invert Hl.
+  apply (IHl2 Hf H3 (f acc l1)).
+  apply (Hf l1 acc H2 Hacc).
+Qed.
+
+Lemma val_to_single_stack_typed x t
+  : val_well_typed x t <-> stack_well_typed [x] [t].
+Proof.
+  split.
+  - intro Hv. apply Forall2_cons; [ exact Hv | apply Forall2_nil ].
+  - intro Hs. invert Hs. exact H2.
+Qed.
 
 (*
   Now that we have values, we can define our syntax of commands.
@@ -308,18 +338,13 @@ Fixpoint interp_cmd (c : stack_cmd) (s : list stack_val) : list stack_val :=
       let (l,s1) := stack_pop s in
       let out := val_flatmap (fun x => stack_peek (interp_cmd cf [x])) l in
       interp_cmd c' (out::s1)
-  | cmd_reduce cf c' => 
+  | cmd_reduce cf c' =>
       let (l,s) := stack_pop s in
       let (acc,s) := stack_pop s in
       let out := val_reduce (fun acc x => stack_peek (interp_cmd cf [x;acc])) l acc in
       interp_cmd c' (out::s)
   | cmd_skip => s
   end.
-
-
-
-
-
 
 
 
@@ -338,8 +363,42 @@ Lemma interp_sound S c S'
     forall s, stack_well_typed s S ->
               stack_well_typed (interp_cmd c s) S'.
 Proof.
-Admitted.
-  
+  induct 1; intros s Hs; simpl.
+  - apply IHcmd_well_typed. now apply Forall2_cons.
+  - apply IHcmd_well_typed. induct s; [ inversion Hs | ].
+    simpl. invert Hs. apply Forall2_cons; [ apply (H a H4) | exact H6 ].
+  - apply IHcmd_well_typed. invert Hs. induct l; [ inversion H5 | ].
+    invert H5. simpl. apply Forall2_cons; [ apply (H x a H4 H6) | exact H8 ].
+  - apply IHcmd_well_typed. (* Forall2_swap is a theorem for swap *)
+    apply Forall2_swap. exact Hs.
+  - induct s; [ inversion Hs | ]. (* disgard the inmpossible s *)
+    simpl. apply IHcmd_well_typed1. invert Hs.
+    apply Forall2_cons; [ | exact H6 ]. (* use val_flatmap_sound to prove *)
+    apply (val_flatmap_sound t1 t2 _ a); [ | exact H4 ]. intros x Hx.
+    (* convert [x] to a stack, list of values *)
+    specialize (IHcmd_well_typed2 [x]). apply val_to_single_stack_typed in Hx.
+    apply IHcmd_well_typed2 in Hx.
+    (* destruct interp_cmd ... to assert it as a single value list *)
+    destruct (interp_cmd cf [x]); [ invert Hx | ].
+    destruct l; [ | invert Hx; invert H8 ].
+    apply val_to_single_stack_typed in Hx. simpl. exact Hx.
+  - destruct s; [ invert Hs | ]. simpl. (* Do two inversions to show s as a::b::l *)
+    destruct s0; [ invert Hs; invert H6 | ]. simpl. apply IHcmd_well_typed1.
+    invert Hs. invert H6. apply Forall2_cons; [ | exact H8 ].
+    (* use val_reduce sound lemma to prove *)
+    apply val_reduce_sound with (t1 := t); [ | exact H4 | exact H5 ].
+    intros x acc Hxt Hacc.
+    (* Use IHcmd_well_typed2 to prove t_acc, it has [t; t_acc]. *)
+    assert (Hxacc: stack_well_typed [x; acc] [t; t_acc]) by
+      (apply Forall2_cons; [ exact Hxt | ]; apply val_to_single_stack_typed;
+       exact Hacc).
+    apply IHcmd_well_typed2 in Hxacc.
+    (* destruct interp_cmd cf [x; acc] as a::s *)
+    destruct (interp_cmd cf [x; acc]); [ inversion Hxacc | ]. simpl.
+    invert Hxacc. exact H6.
+  - exact Hs.
+Qed.
+
 
 (*
   Sometimes it's useful to combine two sequences of commands.
@@ -347,23 +406,38 @@ Admitted.
   concatenation of its inputs and you can prove the two following
   lemmas.
  *)
-Fixpoint cmd_seq (c1 c2 : stack_cmd) : stack_cmd.
-Admitted.
-
+Fixpoint cmd_seq (c1 c2 : stack_cmd) : stack_cmd :=
+  match c1 with
+  | cmd_atom v c11 => cmd_atom v (cmd_seq c11 c2)
+  | cmd_unop f c11 => cmd_unop f (cmd_seq c11 c2)
+  | cmd_binop f c11 => cmd_binop f (cmd_seq c11 c2)
+  | cmd_swap n1 n2 c11 => cmd_swap n1 n2 (cmd_seq c11 c2)
+  | cmd_flatmap cf c11 => cmd_flatmap cf (cmd_seq c11 c2)
+  | cmd_reduce cf c11 => cmd_reduce cf (cmd_seq c11 c2)
+  | cmd_skip => c2
+  end.
 
 Lemma cmd_seq_wt S1 S2 S3 c1 c2
   : cmd_well_typed S1 c1 S2 ->
     cmd_well_typed S2 c2 S3 ->
     cmd_well_typed S1 (cmd_seq c1 c2) S3.
 Proof.
-Admitted.
+  induct 1; intro Hc2; simpl; try (apply IHcmd_well_typed in Hc2; econstructor);
+    try exact H; try exact Hc2; try exact H0;
+    [ apply cmd_flatmap_wt with (t2 := t2) | apply cmd_reduce_wt ];
+    try apply (IHcmd_well_typed1 Hc2); try exact H0.
+Qed.
 
 Lemma interp_seq c1 c2 s
   : interp_cmd (cmd_seq c1 c2) s
     = interp_cmd c2 (interp_cmd c1 s).
 Proof.
-Admitted.
-
+  induct c1; simpl; try apply IHc1.
+  - destruct s; simpl. all: apply IHc1_2.
+  - destruct s; simpl; [ apply IHc1_2 | ].
+    destruct s0; simpl. all: apply IHc1_2.
+  - reflexivity.
+Qed.
 
 
 (*
@@ -389,7 +463,7 @@ Fixpoint partial_eval c :=
       | cmd_binop f c'' => cmd_unop (f v) c''
       | c'_fused => cmd_atom v c'_fused
       end
-  | cmd_unop f c' => 
+  | cmd_unop f c' =>
       match partial_eval c' with
       | cmd_unop g c'' => cmd_unop (fun v => g (f v)) c''
       | cmd_binop g c'' => cmd_binop (fun v1 v2 => g (f v1) v2) c''
@@ -400,7 +474,7 @@ Fixpoint partial_eval c :=
       | cmd_unop g c'' => cmd_binop (fun v1 v2 => g (f v1 v2)) c''
       | c'_fused => cmd_binop f c'_fused
       end
-  | cmd_swap n1 n2 c' => cmd_swap n1 n2 (partial_eval c')                 
+  | cmd_swap n1 n2 c' => cmd_swap n1 n2 (partial_eval c')
   | cmd_flatmap cf1 c' => cmd_flatmap (partial_eval cf1) (partial_eval c')
   | cmd_reduce cf c' => cmd_reduce (partial_eval cf) (partial_eval c')
   | cmd_skip => cmd_skip
@@ -485,8 +559,43 @@ Proof.
 Qed.
 
 
+(* Lemma for fun extensionality *)
+Lemma flatmap_funext_typed f g l t1
+  : (forall x, val_well_typed x t1 -> f x = g x) ->
+    val_well_typed l (ty_list t1) ->
+    val_flatmap f l = val_flatmap g l.
+Proof.
+  induct 1; simpl; [ reflexivity | ].
+  pose proof (H v1 H0_) as Hfg. rewrite Hfg.
+  assert (Hfv2: val_flatmap f v2 = val_flatmap g v2) by
+    (now apply IHval_well_typed2 with (t1 := t1)).
+  destruct (g v1); simpl; [ reflexivity | exact Hfv2 | ].
+  simpl. rewrite Hfv2. reflexivity.
+Qed.
 
-(* 
+Lemma flatmap_funext f g l
+  : (forall x, f x = g x) ->
+    val_flatmap f l = val_flatmap g l.
+Proof.
+  induct l; intros Heq; simpl; try reflexivity.
+  rewrite (Heq l1). rewrite (IHl2 Heq). reflexivity.
+Qed.
+
+Lemma reduce_funext_typed f g l t1 t2
+  : (forall x acc', val_well_typed x t1 ->
+               val_well_typed acc' t2 ->
+               ((val_well_typed (f acc' x) t2) /\ (f acc' x = g acc' x))) ->
+    val_well_typed l (ty_list t1) ->
+    (forall acc, val_well_typed acc t2 ->
+            val_reduce f l acc = val_reduce g l acc).
+Proof.
+  intros Hfg Hl acc Hacc. induct l; [ inversion Hl | simpl; reflexivity | ].
+  invert Hl. simpl. pose proof (Hfg l1 acc H2 Hacc) as Hl1.
+  destruct Hl1 as [Hl1 Heq]. rewrite <- Heq.
+  apply IHl2 with (t1 := t1) (t2 := t2); [ exact Hfg | exact H3 | exact Hl1 ].
+Qed.
+
+(*
   Now that we've warmed up, let's get to the meat of this assigment,
   proving compiler correctness. Since we've defined the semantics of
   our language with an interpreter, we want to show that, given an
@@ -512,7 +621,91 @@ Lemma partial_eval_correct S c S'
   : cmd_well_typed S c S' ->
     forall s, stack_well_typed s S -> interp_cmd (partial_eval c) s = interp_cmd c s.
 Proof.
-Admitted.
+  induct 1; intros s Hs.
+  - simpl. assert (Hts: stack_well_typed (v :: s) (t :: S)) by
+      (now apply Forall2_cons). cases (partial_eval c).
+    all: try (simpl; apply IHcmd_well_typed in Hts; rewrite <- Hts; simpl;
+              reflexivity).
+    pose proof (partial_eval_sound _ c S' H0) as Hpc. rewrite Heq in Hpc.
+    invert Hs. invert Hpc.    (* Hpc is well typed if s has more than one cmd *)
+    apply IHcmd_well_typed in Hts. rewrite <- Hts. simpl. reflexivity.
+  - simpl. invert Hs. apply H in H4.
+    assert (Hts: stack_well_typed ((f x) :: l) (t2 :: S)) by
+      (now apply Forall2_cons). cases (partial_eval c).
+    all: try (simpl; apply IHcmd_well_typed in Hts; rewrite <- Hts; simpl;
+              reflexivity).
+    pose proof (partial_eval_sound _ c S' H0) as Hpc. rewrite Heq in Hpc.
+    invert H5; [ invert Hpc | ]. (* l should have more than one cmd *)
+    invert Hpc. apply IHcmd_well_typed in Hts. simpl. rewrite <- Hts. simpl.
+    reflexivity.
+  - simpl. invert Hs. invert H5. pose proof (H x x0 H4 H6) as Hbinop.
+    assert (Hts: stack_well_typed ((f x x0) :: l0) (t3 :: S)) by
+      (now apply Forall2_cons). cases (partial_eval c).
+    all: try (simpl; apply IHcmd_well_typed in Hts; rewrite <- Hts; simpl;
+              reflexivity).
+  - simpl. invert Hs; [ inversion H0 | ]. apply IHcmd_well_typed.
+    (* Use Forall2_swap and cons *)
+    apply Forall2_swap. now apply Forall2_cons.
+  - invert Hs. invert H4;
+    [ simpl; apply IHcmd_well_typed1; apply Forall2_cons;
+      [ apply val_nil_wt | exact H5 ]
+    | ].
+    simpl.
+    assert (Hcf: forall x : stack_val,
+               val_well_typed x t1 ->
+               interp_cmd (partial_eval cf) [x] = interp_cmd cf [x]) by
+      (intros x Hx; apply val_to_single_stack_typed in Hx;
+        now apply IHcmd_well_typed2).
+    rewrite flatmap_funext_typed
+      with (t1 := t1)
+           (g := (fun x : stack_val => stack_peek (interp_cmd cf [x])));
+      [ | intros x Hx; apply f_equal; now apply Hcf | exact H6 ].
+    rewrite Hcf; [ | exact H2]. apply IHcmd_well_typed1. apply Forall2_cons;
+      [ | exact H5 ].
+    apply val_to_single_stack_typed in H2.
+    pose proof (interp_sound _ _ _ H0 [v1] H2) as Hcfv1.
+    (* disgard (interp_cmd cf [v1]) as [] case *)
+    destruct (interp_cmd cf [v1]); [ inversion Hcfv1 | ]. simpl.
+    induct s.
+    + simpl. rewrite Forall2_cons_iff in Hcfv1. destruct Hcfv1 as [Hvlit _].
+      invert Hvlit.
+    + simpl. apply val_flatmap_sound with (t1 := t1); [ | exact H6 ].
+      intros x Hx. apply val_to_single_stack_typed in Hx.
+      apply (interp_sound _ _ _ H0 [x]) in Hx.
+      destruct (interp_cmd cf [x]); [ invert Hx | ]. simpl.
+      rewrite Forall2_cons_iff in Hx. now destruct Hx as [Hv _].
+    + simpl. invert Hcfv1. invert H7. apply val_cons_wt; [ exact H8 | ].
+      apply IHs2 with (l0 := l0). now apply Forall2_cons.
+  - invert Hs. invert H4;
+      [ invert H5; simpl; apply IHcmd_well_typed1; now apply Forall2_cons | ].
+    invert H5. assert (Htacc: forall x acc,
+                          val_well_typed x t ->
+                          val_well_typed acc t_acc ->
+                          stack_well_typed [x; acc] [t; t_acc]) by
+      (intros x0 acc Hx Hacc; apply Forall2_cons; [ exact Hx | now apply Forall2_cons ]).
+    pose proof (IHcmd_well_typed2 _ (Htacc v1 x H2 H7)) as Hcf. simpl.
+    rewrite Hcf.
+    (* Add two auxiliary to prove interp_cmd cf one step is well typed *)
+    rewrite reduce_funext_typed with
+      (t1 := t) (t2 := t_acc)
+      (g := (fun acc x0 : stack_val => stack_peek (interp_cmd cf [x0; acc]))).
+    + apply IHcmd_well_typed1. apply Forall2_cons; [ | exact H8 ].
+      apply val_reduce_sound with (t1 := t);
+        [ intros x0 acc Hx0 Hacc | exact H6 | ].
+      * apply interp_sound with (s := [x0; acc]) in H0; [ | now apply Htacc ].
+        now invert H0.
+      * apply interp_sound with (s := [v1; x]) in H0; [ | now apply Htacc ].
+        now invert H0.
+    + intros x0 acc' Hx0 Hacc'. split.
+      * rewrite (IHcmd_well_typed2 _ (Htacc x0 acc' Hx0 Hacc')).
+        apply interp_sound with (s := [x0; acc']) in H0; [ | now apply Htacc ].
+        now invert H0.
+      * apply f_equal. apply (IHcmd_well_typed2 _ (Htacc x0 acc' Hx0 Hacc')).
+    + exact H6.
+    + apply interp_sound with (s := [v1; x]) in H0;
+        [ now invert H0 | now apply Htacc ].
+  - simpl. reflexivity.
+Qed.
 
 
 (*
@@ -525,7 +718,7 @@ Admitted.
 
   The following lemma formalizes this idea.
 
-  
+
   If you're having trouble with the function argument to val_flatmap,
   read HINT 4 in Pset6Sig.v.
  *)
@@ -533,7 +726,16 @@ Lemma flatmap_fuse : forall cf1 cf2 c s,
     interp_cmd (cmd_flatmap cf1 (cmd_flatmap cf2 c)) s
     = interp_cmd (cmd_flatmap (cmd_seq cf1 (cmd_flatmap cf2 cmd_skip)) c) s.
 Proof.
-Admitted.
+  intros cf1 cf2 c s. induct s; [ simpl; reflexivity | ]. simpl. f_equal.
+  rewrite flatmap_funext with
+    (f := (fun x : stack_val =>
+             stack_peek
+               (interp_cmd (cmd_seq cf1 (cmd_flatmap cf2 cmd_skip)) [x])))
+    (g := (fun x : stack_val =>
+             stack_peek
+               (interp_cmd (cmd_flatmap cf2 cmd_skip) (interp_cmd cf1 [x]))));
+    [ | intro x; f_equal; apply interp_seq ].
+  Abort.
 
 
 (*
