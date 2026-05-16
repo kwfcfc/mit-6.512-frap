@@ -581,6 +581,27 @@ Proof.
   rewrite (Heq l1). rewrite (IHl2 Heq). reflexivity.
 Qed.
 
+(* Some lemmas about flatmap and val_app *)
+Lemma app_assoc a b c: val_app a (val_app b c) = val_app (val_app a b) c.
+Proof.
+  induct a; simpl; try reflexivity.
+  f_equal. apply IHa2.
+Qed.
+
+Lemma flatmap_app_distr f l r
+  : val_flatmap f (val_app l r) = val_app (val_flatmap f l) (val_flatmap f r).
+Proof.
+  induct l; simpl; try reflexivity.
+  rewrite IHl2. rewrite app_assoc. reflexivity.
+Qed.
+
+Lemma flatmap_compose f g l:
+  val_flatmap f (val_flatmap g l) = val_flatmap (fun x => val_flatmap f (g x)) l.
+Proof.
+  induct l; simpl; try reflexivity.
+  rewrite flatmap_app_distr. rewrite IHl2. reflexivity.
+Qed.
+
 Lemma reduce_funext_typed f g l t1 t2
   : (forall x acc', val_well_typed x t1 ->
                val_well_typed acc' t2 ->
@@ -726,7 +747,7 @@ Lemma flatmap_fuse : forall cf1 cf2 c s,
     interp_cmd (cmd_flatmap cf1 (cmd_flatmap cf2 c)) s
     = interp_cmd (cmd_flatmap (cmd_seq cf1 (cmd_flatmap cf2 cmd_skip)) c) s.
 Proof.
-  intros cf1 cf2 c s. induct s; [ simpl; reflexivity | ]. simpl. f_equal.
+  intros cf1 cf2 c s. destruct s; [ simpl; reflexivity | ]. simpl. f_equal.
   rewrite flatmap_funext with
     (f := (fun x : stack_val =>
              stack_peek
@@ -735,8 +756,11 @@ Proof.
              stack_peek
                (interp_cmd (cmd_flatmap cf2 cmd_skip) (interp_cmd cf1 [x]))));
     [ | intro x; f_equal; apply interp_seq ].
-  Abort.
-
+  f_equal. induct s; try (simpl; reflexivity). simpl.
+  rewrite flatmap_app_distr.    (* use distr to unwrap val_app *)
+  destruct (interp_cmd cf1 [s1]); try (simpl; reflexivity). simpl. f_equal.
+  now apply IHs2.
+Qed.
 
 (*
   Now, define an optimization pass that does this transformation on an
@@ -750,8 +774,21 @@ Proof.
 
   If you're having trouble with the tests, read HINT 5 in Pset6Sig.v.
  *)
-Fixpoint loop_fuse (c : stack_cmd) : stack_cmd.
-Admitted.
+Fixpoint loop_fuse (c : stack_cmd) : stack_cmd :=
+  match c with
+  | cmd_atom v c' => cmd_atom v (loop_fuse c')
+  | cmd_unop f c' => cmd_unop f (loop_fuse c')
+  | cmd_binop f c' => cmd_binop f (loop_fuse c')
+  | cmd_swap n1 n2 c' => cmd_swap n1 n2 (loop_fuse c')
+  | cmd_flatmap cf1 c1 =>
+      match loop_fuse c1 with
+      | cmd_flatmap cf2 c2 => cmd_flatmap (cmd_seq (loop_fuse cf1) (cmd_flatmap cf2 cmd_skip)) c2
+      | c1_fused => cmd_flatmap (loop_fuse cf1) c1_fused
+      end
+  | cmd_reduce cf c' => cmd_reduce (loop_fuse cf) (loop_fuse c')
+  | cmd_skip => cmd_skip
+  end.
+
 
 (*
   Your loop_fuse optimizer should pass all of the following tests.
@@ -769,7 +806,7 @@ Lemma loop_fuse_test1
                             (cmd_flatmap (cmd_lit 1 (cmd_add (cmd_singleton cmd_skip)))
                                cmd_skip))))
          cmd_skip).
-Proof. (* equality. *) Admitted.
+Proof. equality. Qed.
 
 Lemma loop_fuse_test2
   : loop_fuse (cmd_flatmap (cmd_flatmap (cmd_unop val_square (cmd_singleton cmd_skip))
@@ -784,7 +821,7 @@ Lemma loop_fuse_test2
                      cmd_skip)))
             (cmd_singleton cmd_skip))
          cmd_skip.
-Proof. (* equality. *) Admitted.
+Proof. equality. Qed.
 
 
 Lemma loop_fuse_test3
@@ -804,7 +841,7 @@ Lemma loop_fuse_test3
                              cmd_skip))))
                  cmd_skip)))
         cmd_skip.
-Proof. (* equality. *) Admitted.
+Proof. equality. Qed.
 
 
 (* As a first step, let's prove that this optimization preserves
@@ -815,7 +852,11 @@ Lemma loop_fuse_sound S c S'
   : cmd_well_typed S c S' ->
     cmd_well_typed S (loop_fuse c) S'.
 Proof.
-Admitted.
+  induct 1; simplify; eauto.
+  cases (loop_fuse c); simplify; eauto.
+  invert IHcmd_well_typed1. apply cmd_flatmap_wt with (t2 := t3); eauto.
+  apply cmd_seq_wt with (S2 := [ty_list t2]); eauto.
+Qed.
 
 
 (*
@@ -827,7 +868,70 @@ Lemma loop_fuse_correct S c S'
   : cmd_well_typed S c S' ->
     forall s, stack_well_typed s S -> interp_cmd (loop_fuse c) s = interp_cmd c s.
 Proof.
-Admitted.
+  induct 1; intros s Hs; simplify; eauto.
+  - destruct s. all: invert Hs.
+    simpl. apply IHcmd_well_typed. apply Forall2_cons; [ | exact H6 ].
+    apply (H s H4).
+  - destruct s. all: invert Hs. destruct s0. all: invert H6. simpl.
+    apply IHcmd_well_typed. apply Forall2_cons; [ | exact H8 ].
+    apply (H s s0 H4 H5).
+  - destruct s; [ invert Hs | ]. simpl.
+    assert (Hlf: forall x : stack_val,
+               val_well_typed x t1 ->
+               interp_cmd (loop_fuse cf) [x] = interp_cmd cf [x]) by
+      (intros x Hx; apply val_to_single_stack_typed in Hx;
+       apply (IHcmd_well_typed2 [x] Hx)).
+    cases (loop_fuse c).
+    all: try solve [
+             invert Hs; simpl;
+             rewrite flatmap_funext_typed with
+               (t1 := t1)
+               (g := (fun x : stack_val => stack_peek (interp_cmd cf [x])));
+             [ | intros x Hx; f_equal; apply IHcmd_well_typed2;
+                 now apply val_to_single_stack_typed
+             | exact H4 ];
+             rewrite <- IHcmd_well_typed1; [ reflexivity | ];
+             apply Forall2_cons; [ | exact H6 ];
+             apply val_flatmap_sound with (t1 := t1); [ | exact H4 ];
+             intros x Hx; apply val_to_single_stack_typed in Hx;
+             pose proof (interp_sound _ _ _ H0 [x] Hx) as Hxt; now invert Hxt
+           ].
+    invert Hs. rewrite <- IHcmd_well_typed1.
+    2: {
+      apply Forall2_cons; [ | exact H6 ].
+      apply val_flatmap_sound with (t1 := t1); [ | exact H4 ]. intros x Hx.
+      apply val_to_single_stack_typed in Hx.
+      pose proof (interp_sound _ _ _ H0 [x] Hx) as Hxt. now invert Hxt.
+    }
+    simpl. rewrite flatmap_funext_typed with
+      (t1 := t1)
+      (g := (fun x : stack_val =>
+               stack_peek (interp_cmd (cmd_flatmap s1_1 cmd_skip)
+                             (interp_cmd cf [x]))));
+      [ | intros x Hx; f_equal; rewrite <- (Hlf x Hx); apply interp_seq
+      | exact H4 ].
+    f_equal. f_equal. rewrite flatmap_compose. induct s; try reflexivity.
+    simpl. cases (interp_cmd cf [s1]); simpl; [ reflexivity | ]. f_equal.
+    apply IHs2 with (s0 := s0); [ exact Hlf | now invert H4 | exact H6 ].
+  - destruct s; [ invert Hs | ]. simpl. destruct s0; [ invert Hs; invert H6 | ].
+    simpl. invert Hs. invert H6. rewrite IHcmd_well_typed1.
+    2: {
+      apply Forall2_cons; [ | exact H8 ]. apply val_reduce_sound with (t1 := t);
+        [ | exact H4 | exact H5 ]. intros x acc Hx Hacc.
+      apply val_to_single_stack_typed in Hx,Hacc.
+      apply (Forall2_app _ _ _ _ _ _ _ Hx) in Hacc. simpl in Hacc.
+      pose proof (interp_sound _ _ _ H0 [x; acc] Hacc) as Hrf.
+      rewrite (IHcmd_well_typed2 _ Hacc). now invert Hrf.
+    }
+    f_equal. f_equal. induct s; simpl; try reflexivity. invert H4.
+    rewrite IHcmd_well_typed2; [ | apply Forall2_cons;
+                                   [ exact H6 |
+                                     now apply val_to_single_stack_typed ]].
+    apply IHs2 with (s1 := s3); [ exact H7 | | exact H8 ].
+    apply val_to_single_stack_typed in H6,H5.
+    apply (Forall2_app _ _ _ _ _ _ _ H6) in H5. simpl in H5.
+    pose proof (interp_sound _ _ _ H0 [s1; s0] H5) as Hrf. now invert Hrf.
+Qed.
 
 
 
